@@ -2,7 +2,12 @@ import { DEFAULT_BASEMAP } from "@geolibre/core";
 import type { GeoLibreLayer, MapViewState } from "@geolibre/core";
 import maplibregl from "maplibre-gl";
 import { LayerControl } from "maplibre-gl-layer-control";
-import { getLayerBounds } from "./geojson-loader";
+import {
+  circleLayerId,
+  fillLayerId,
+  getLayerBounds,
+  lineLayerId,
+} from "./geojson-loader";
 import { removeLayerFromMap, syncLayer } from "./layer-sync";
 
 const DEFAULT_PROJECTION: maplibregl.ProjectionSpecification = {
@@ -25,6 +30,21 @@ const TERRAIN_OPTIONS: maplibregl.TerrainSpecification = {
   source: TERRAIN_SOURCE_ID,
   exaggeration: 1,
 };
+
+interface NamedLayerState {
+  visible: boolean;
+  opacity: number;
+  name: string;
+}
+
+interface LayerControlConfig {
+  layers?: string[];
+  layerStates?: Record<string, NamedLayerState>;
+}
+
+interface GeoLibreLayerLabelWindow extends Window {
+  __GEOLIBRE_LAYER_LABELS__?: Record<string, string>;
+}
 
 export type BuiltInMapControl =
   | "navigation"
@@ -78,7 +98,9 @@ export class MapController {
   private attributionControl: maplibregl.AttributionControl | null = null;
   private logoControl: maplibregl.LogoControl | null = null;
   private layerControl: LayerControl | null = null;
+  private layerControlSignature = "";
   private basemapStyleUrl = DEFAULT_BASEMAP;
+  private syncedLayers: GeoLibreLayer[] = [];
   private layerIds: string[] = [];
   private controlVisibility: Record<BuiltInMapControl, boolean> = {
     ...DEFAULT_BUILT_IN_CONTROL_VISIBILITY,
@@ -210,6 +232,7 @@ export class MapController {
     this.removeLayerControl();
     this.map?.remove();
     this.map = null;
+    this.publishLayerDisplayNames([]);
   }
 
   setStyle(url: string): void {
@@ -264,10 +287,13 @@ export class MapController {
       }
     }
 
-    for (const layer of layers) {
-      syncLayer(this.map, layer);
+    for (const [index, layer] of layers.entries()) {
+      syncLayer(this.map, layer, this.getBeforeStyleLayerId(layers, index));
     }
     this.layerIds = nextIds;
+    this.syncedLayers = layers;
+    this.publishLayerDisplayNames(layers);
+    this.refreshLayerControl(layers);
   }
 
   private styleLoadHandler: (() => void) | null = null;
@@ -344,12 +370,17 @@ export class MapController {
     ) {
       return false;
     }
+    const layerControlConfig = this.createLayerControlConfig(this.syncedLayers);
+    this.layerControlSignature = this.createLayerControlSignature(
+      layerControlConfig,
+    );
     this.layerControl = new LayerControl({
       basemapStyleUrl: this.basemapStyleUrl,
       collapsed: true,
       panelWidth: 340,
       panelMinWidth: 240,
       panelMaxWidth: 450,
+      ...layerControlConfig,
     });
     this.map.addControl(
       this.layerControl,
@@ -362,6 +393,149 @@ export class MapController {
     if (!this.map || !this.layerControl) return;
     this.removeControl(this.layerControl);
     this.layerControl = null;
+  }
+
+  private refreshLayerControl(layers: GeoLibreLayer[]): void {
+    if (
+      !this.map ||
+      !this.layerControl ||
+      !this.controlVisibility["layer-control"]
+    ) {
+      return;
+    }
+
+    const layerControlConfig = this.createLayerControlConfig(layers);
+    const nextSignature = this.createLayerControlSignature(layerControlConfig);
+    if (nextSignature === this.layerControlSignature) return;
+
+    this.removeLayerControl();
+    this.addLayerControl();
+  }
+
+  private createLayerControlConfig(
+    layers: GeoLibreLayer[],
+  ): LayerControlConfig {
+    const namedStyleLayers = layers.flatMap((layer) =>
+      this.getNamedStyleLayers(layer),
+    );
+    if (namedStyleLayers.length === 0) return {};
+
+    return {
+      layers: namedStyleLayers.map(({ id }) => id),
+      layerStates: Object.fromEntries(
+        namedStyleLayers.map(({ id, name, layer }) => [
+          id,
+          {
+            visible: layer.visible,
+            opacity: layer.opacity,
+            name,
+          },
+        ]),
+      ),
+    };
+  }
+
+  private createLayerControlSignature(config: LayerControlConfig): string {
+    return JSON.stringify({
+      layers: config.layers ?? [],
+      names: Object.fromEntries(
+        Object.entries(config.layerStates ?? {}).map(([id, state]) => [
+          id,
+          state.name,
+        ]),
+      ),
+    });
+  }
+
+  private getNamedStyleLayers(layer: GeoLibreLayer): Array<{
+    id: string;
+    name: string;
+    layer: GeoLibreLayer;
+  }> {
+    if (!this.map) return [];
+
+    const existingStyleLayers = this.getCandidateStyleLayers(layer).filter(
+      ({ id }) => this.map?.getLayer(id),
+    );
+    return existingStyleLayers.map(({ id, suffix }) => ({
+      id,
+      name:
+        existingStyleLayers.length > 1 && suffix
+          ? `${layer.name} ${suffix}`
+          : layer.name,
+      layer,
+    }));
+  }
+
+  private getBeforeStyleLayerId(
+    layers: GeoLibreLayer[],
+    layerIndex: number,
+  ): string | undefined {
+    if (!this.map) return undefined;
+
+    for (const layer of layers.slice(layerIndex + 1)) {
+      const beforeLayer = this.getCandidateStyleLayers(layer).find(({ id }) =>
+        this.map?.getLayer(id),
+      );
+      if (beforeLayer) return beforeLayer.id;
+    }
+
+    if (layerIndex >= 0) {
+      return this.getExternalBeforeStyleLayerId(layers[layerIndex]);
+    }
+
+    return undefined;
+  }
+
+  private getExternalBeforeStyleLayerId(
+    layer: GeoLibreLayer | undefined,
+  ): string | undefined {
+    if (!this.map || !layer?.beforeId) return undefined;
+    if (
+      this.getCandidateStyleLayers(layer).some(({ id }) => id === layer.beforeId)
+    ) {
+      return undefined;
+    }
+    return this.map.getLayer(layer.beforeId) ? layer.beforeId : undefined;
+  }
+
+  private getCandidateStyleLayers(layer: GeoLibreLayer): Array<{
+    id: string;
+    suffix?: string;
+  }> {
+    if (layer.type === "geojson") {
+      return [
+        { id: fillLayerId(layer.id), suffix: "Polygons" },
+        { id: lineLayerId(layer.id), suffix: "Lines" },
+        { id: circleLayerId(layer.id), suffix: "Points" },
+      ];
+    }
+
+    if (
+      layer.type === "raster" ||
+      layer.type === "wms" ||
+      layer.type === "xyz"
+    ) {
+      return [{ id: `layer-${layer.id}-raster` }];
+    }
+
+    if (layer.type === "vector-tiles") {
+      return [{ id: `layer-${layer.id}-vector` }];
+    }
+
+    return [];
+  }
+
+  private publishLayerDisplayNames(layers: GeoLibreLayer[]): void {
+    if (typeof window === "undefined") return;
+
+    const labelWindow = window as GeoLibreLayerLabelWindow;
+    labelWindow.__GEOLIBRE_LAYER_LABELS__ = Object.fromEntries(
+      layers
+        .flatMap((layer) => this.getNamedStyleLayers(layer))
+        .map(({ id, name }) => [id, name]),
+    );
+    window.dispatchEvent(new CustomEvent("geolibre-layer-labels-change"));
   }
 
   private addNavigationControl(): boolean {

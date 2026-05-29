@@ -8,7 +8,9 @@ import {
   sourceId,
 } from "./geojson-loader";
 import { isPlaceholderLayer } from "./placeholders";
-import { circlePaint, fillPaint, linePaint } from "./style-mapper";
+import { circlePaint, fillPaint, linePaint, rasterPaint } from "./style-mapper";
+
+const WMS_PROXY_PATH = "/__geolibre_wms_proxy";
 
 export function syncLayer(
   map: maplibregl.Map,
@@ -22,8 +24,12 @@ export function syncLayer(
     return;
   }
 
-  if (layer.type === "xyz") {
-    syncXyzLayer(map, layer, beforeId);
+  if (
+    layer.type === "raster" ||
+    layer.type === "wms" ||
+    layer.type === "xyz"
+  ) {
+    syncRasterTileLayer(map, layer, beforeId);
     return;
   }
 
@@ -53,81 +59,127 @@ function syncGeoJsonLayer(
   const opacity = layer.opacity;
 
   if (profile.hasPolygon) {
-    ensureLayer(map, fillLayerId(layer.id), {
-      id: fillLayerId(layer.id),
-      type: "fill",
-      source: src,
-      filter: [
-        "match",
-        ["geometry-type"],
-        ["Polygon", "MultiPolygon"],
-        true,
-        false,
-      ],
-      paint: fillPaint(layer.style, opacity),
-      layout: { visibility },
-    }, beforeId);
+    ensureLayer(
+      map,
+      fillLayerId(layer.id),
+      {
+        id: fillLayerId(layer.id),
+        type: "fill",
+        source: src,
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["Polygon", "MultiPolygon"],
+          true,
+          false,
+        ],
+        paint: fillPaint(layer.style, opacity),
+        layout: { visibility },
+      },
+      beforeId,
+    );
   } else {
     removeIfExists(map, fillLayerId(layer.id));
   }
 
   if (profile.hasLine || profile.hasPolygon) {
-    ensureLayer(map, lineLayerId(layer.id), {
-      id: lineLayerId(layer.id),
-      type: "line",
-      source: src,
-      filter: [
-        "match",
-        ["geometry-type"],
-        ["LineString", "MultiLineString", "Polygon", "MultiPolygon"],
-        true,
-        false,
-      ],
-      paint: linePaint(layer.style, opacity),
-      layout: { visibility },
-    }, beforeId);
+    ensureLayer(
+      map,
+      lineLayerId(layer.id),
+      {
+        id: lineLayerId(layer.id),
+        type: "line",
+        source: src,
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["LineString", "MultiLineString", "Polygon", "MultiPolygon"],
+          true,
+          false,
+        ],
+        paint: linePaint(layer.style, opacity),
+        layout: { visibility },
+      },
+      beforeId,
+    );
   } else {
     removeIfExists(map, lineLayerId(layer.id));
   }
 
   if (profile.hasPoint) {
-    ensureLayer(map, circleLayerId(layer.id), {
-      id: circleLayerId(layer.id),
-      type: "circle",
-      source: src,
-      filter: [
-        "match",
-        ["geometry-type"],
-        ["Point", "MultiPoint"],
-        true,
-        false,
-      ],
-      paint: circlePaint(layer.style, opacity),
-      layout: { visibility },
-    }, beforeId);
+    ensureLayer(
+      map,
+      circleLayerId(layer.id),
+      {
+        id: circleLayerId(layer.id),
+        type: "circle",
+        source: src,
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["Point", "MultiPoint"],
+          true,
+          false,
+        ],
+        paint: circlePaint(layer.style, opacity),
+        layout: { visibility },
+      },
+      beforeId,
+    );
   } else {
     removeIfExists(map, circleLayerId(layer.id));
   }
 }
 
-function syncXyzLayer(
+function syncRasterTileLayer(
   map: maplibregl.Map,
   layer: GeoLibreLayer,
   beforeId?: string,
 ): void {
   const src = sourceId(layer.id);
   const lid = `layer-${layer.id}-raster`;
-  const tiles = (layer.source.tiles as string[]) ?? [];
+  const tiles = getRenderableRasterTiles(layer);
+  const tileSize = (layer.source.tileSize as number | undefined) ?? 256;
+  if (tiles.length === 0) return;
   if (!map.getSource(src)) {
-    map.addSource(src, { type: "raster", tiles, tileSize: 256 });
+    map.addSource(src, { type: "raster", tiles, tileSize });
   }
-  ensureLayer(map, lid, {
-    id: lid,
-    type: "raster",
-    source: src,
-    paint: { "raster-opacity": layer.opacity },
-    layout: { visibility: layer.visible ? "visible" : "none" },
-  }, beforeId);
+  ensureLayer(
+    map,
+    lid,
+    {
+      id: lid,
+      type: "raster",
+      source: src,
+      paint: rasterPaint(layer.style, layer.opacity),
+      layout: { visibility: layer.visible ? "visible" : "none" },
+    },
+    beforeId,
+  );
+}
+
+function getRenderableRasterTiles(layer: GeoLibreLayer): string[] {
+  const tiles = (layer.source.tiles as string[]) ?? [];
+  if (layer.type !== "wms" || !isViteDevServer()) return tiles;
+  return tiles.map(proxyWmsTileUrl);
+}
+
+function isViteDevServer(): boolean {
+  return Boolean(
+    (
+      import.meta as ImportMeta & {
+        env?: { DEV?: boolean };
+      }
+    ).env?.DEV,
+  );
+}
+
+function proxyWmsTileUrl(tileUrl: string): string {
+  const encodedUrl = encodeURIComponent(tileUrl).replaceAll(
+    "%7Bbbox-epsg-3857%7D",
+    "{bbox-epsg-3857}",
+  );
+  return `${WMS_PROXY_PATH}?url=${encodedUrl}`;
 }
 
 function syncVectorTileLayer(
@@ -143,14 +195,19 @@ function syncVectorTileLayer(
   }
   const styleLayerId = `layer-${layer.id}-vector`;
   const sourceLayer = (layer.source.sourceLayer as string) ?? "";
-  ensureLayer(map, styleLayerId, {
-    id: styleLayerId,
-    type: "fill",
-    source: src,
-    "source-layer": sourceLayer,
-    paint: fillPaint(layer.style, layer.opacity),
-    layout: { visibility: layer.visible ? "visible" : "none" },
-  }, beforeId);
+  ensureLayer(
+    map,
+    styleLayerId,
+    {
+      id: styleLayerId,
+      type: "fill",
+      source: src,
+      "source-layer": sourceLayer,
+      paint: fillPaint(layer.style, layer.opacity),
+      layout: { visibility: layer.visible ? "visible" : "none" },
+    },
+    beforeId,
+  );
 }
 
 function ensureLayer(
@@ -173,13 +230,31 @@ function ensureLayer(
         map.setLayoutProperty(id, key, value);
       }
     }
+    moveLayer(map, id, beforeId);
     return;
   }
-  map.addLayer(spec, beforeId);
+  const validBeforeId = beforeId && map.getLayer(beforeId) ? beforeId : undefined;
+  map.addLayer(spec, validBeforeId);
 }
 
 function removeIfExists(map: maplibregl.Map, id: string): void {
   if (map.getLayer(id)) map.removeLayer(id);
+}
+
+function moveLayer(
+  map: maplibregl.Map,
+  id: string,
+  beforeId?: string,
+): void {
+  try {
+    if (beforeId && beforeId !== id && map.getLayer(beforeId)) {
+      map.moveLayer(id, beforeId);
+      return;
+    }
+    map.moveLayer(id);
+  } catch {
+    // Reordering can race style reloads; the next sync pass will retry.
+  }
 }
 
 export function removeLayerFromMap(

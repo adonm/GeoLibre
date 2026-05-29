@@ -40,6 +40,8 @@ export const PROJECT_VERSION = "0.1.0";
 
 export type LayerType =
   | "geojson"
+  | "raster"
+  | "wms"
   | "xyz"
   | "vector-tiles"
   | "pmtiles"
@@ -54,6 +56,11 @@ export interface LayerStyle {
   strokeWidth: number;
   fillOpacity: number;
   circleRadius: number;
+  rasterBrightnessMin: number;
+  rasterBrightnessMax: number;
+  rasterSaturation: number;
+  rasterContrast: number;
+  rasterHueRotate: number;
 }
 
 export const DEFAULT_LAYER_STYLE: LayerStyle = {
@@ -62,6 +69,11 @@ export const DEFAULT_LAYER_STYLE: LayerStyle = {
   strokeWidth: 2,
   fillOpacity: 0.6,
   circleRadius: 6,
+  rasterBrightnessMin: 0,
+  rasterBrightnessMax: 1,
+  rasterSaturation: 0,
+  rasterContrast: 0,
+  rasterHueRotate: 0,
 };
 
 export interface GeoLibreLayer {
@@ -73,6 +85,7 @@ export interface GeoLibreLayer {
   opacity: number;
   style: LayerStyle;
   metadata: Record<string, unknown>;
+  beforeId?: string;
   geojson?: FeatureCollection;
   sourcePath?: string;
 }
