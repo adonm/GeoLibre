@@ -12,13 +12,17 @@ export {
 } from "./plugins/arcgis-layer";
 export {
   addCogRasterLayer,
+  closeSearchPlacesPanel,
+  isSearchPlacesPanelVisible,
   maplibreComponentsPlugin,
   openFlatGeobufAddVectorLayerPanel,
   openLidarLayerPanel,
   openPMTilesLayerPanel,
+  openSearchPlacesPanel,
   openSplattingLayerPanel,
   openStacSearchLayerPanel,
   openZarrLayerPanel,
+  subscribeSearchPlacesPanel,
   type CogRasterLayerOptions,
 } from "./plugins/maplibre-components";
 export { openDuckDBLayerPanel } from "./plugins/maplibre-duckdb";

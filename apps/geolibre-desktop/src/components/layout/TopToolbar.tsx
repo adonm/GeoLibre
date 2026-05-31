@@ -9,14 +9,18 @@ import {
   type MapController,
 } from "@geolibre/map";
 import {
+  closeSearchPlacesPanel,
   openFlatGeobufAddVectorLayerPanel,
   openDuckDBLayerPanel,
   openGeoParquetLayerPanel,
+  isSearchPlacesPanelVisible,
   openLidarLayerPanel,
   openPMTilesLayerPanel,
+  openSearchPlacesPanel,
   openSplattingLayerPanel,
   openStacSearchLayerPanel,
   openZarrLayerPanel,
+  subscribeSearchPlacesPanel,
   type GeoLibreMapControlPosition,
 } from "@geolibre/plugins";
 import {
@@ -46,7 +50,7 @@ import {
   Sun,
   Wrench,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { createAppAPI, usePluginRegistry } from "../../hooks/usePlugins";
 import type { ThemeMode } from "../../hooks/useThemeMode";
 import { openProjectFile, saveProjectFile } from "../../lib/tauri-io";
@@ -161,6 +165,18 @@ export function TopToolbar({
   };
   const handleAddStacLayer = () => {
     openStacSearchLayerPanel(appApi);
+  };
+  const searchPlacesVisible = useSyncExternalStore(
+    subscribeSearchPlacesPanel,
+    isSearchPlacesPanelVisible,
+    isSearchPlacesPanelVisible,
+  );
+  const handleToggleSearchPlaces = () => {
+    if (searchPlacesVisible) {
+      closeSearchPlacesPanel();
+      return;
+    }
+    openSearchPlacesPanel(appApi);
   };
   const handleAddZarrLayer = () => {
     openZarrLayerPanel(appApi);
@@ -278,6 +294,11 @@ export function TopToolbar({
               {controlsVisible[control.id] ? " ✓" : ""}
             </DropdownMenuItem>
           ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={handleToggleSearchPlaces}>
+            Search
+            {searchPlacesVisible ? " ✓" : ""}
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       <DropdownMenu>

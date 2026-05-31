@@ -32,6 +32,8 @@ import type {
   PMTilesLayerControlOptions,
   PMTilesLayerEventHandler,
   PMTilesLayerInfo,
+  SearchControl,
+  SearchControlOptions,
   StacSearchControl,
   StacSearchControlOptions,
   StacSearchEventHandler,
@@ -59,6 +61,8 @@ type CogLayerControlConstructor =
   (typeof import("maplibre-gl-components"))["CogLayerControl"];
 type PMTilesLayerControlConstructor =
   (typeof import("maplibre-gl-components"))["PMTilesLayerControl"];
+type SearchControlConstructor =
+  (typeof import("maplibre-gl-components"))["SearchControl"];
 type StacSearchControlConstructor =
   (typeof import("maplibre-gl-components"))["StacSearchControl"];
 type ZarrLayerControlConstructor =
@@ -89,6 +93,7 @@ interface ComponentsConstructors {
   LidarControl: LidarControlConstructor;
   LidarLayerAdapter: LidarLayerAdapterConstructor;
   PMTilesLayerControl: PMTilesLayerControlConstructor;
+  SearchControl: SearchControlConstructor;
   StacSearchControl: StacSearchControlConstructor;
   ZarrLayerControl: ZarrLayerControlConstructor;
 }
@@ -97,6 +102,7 @@ let componentsControlPosition: GeoLibreMapControlPosition = "top-right";
 const cogRasterControlPosition: GeoLibreMapControlPosition = "top-left";
 const flatGeobufControlPosition: GeoLibreMapControlPosition = "top-left";
 const pmtilesControlPosition: GeoLibreMapControlPosition = "top-left";
+const searchControlPosition: GeoLibreMapControlPosition = "top-right";
 const stacSearchControlPosition: GeoLibreMapControlPosition = "top-left";
 const zarrControlPosition: GeoLibreMapControlPosition = "top-left";
 const lidarControlPosition: GeoLibreMapControlPosition = "top-left";
@@ -197,6 +203,16 @@ const PMTILES_OPTIONS = {
   defaultUrl: PMTILES_SAMPLE_URL,
   fontColor: "hsl(var(--popover-foreground))",
 } satisfies PMTilesLayerControlOptions;
+
+const SEARCH_OPTIONS = {
+  backgroundColor: "hsl(var(--popover))",
+  className: "geolibre-search-control",
+  collapsed: false,
+  fontColor: "hsl(var(--popover-foreground))",
+  maxResults: 8,
+  placeholder: "Search places...",
+  width: 320,
+} satisfies SearchControlOptions;
 
 const STAC_SEARCH_OPTIONS = {
   backgroundColor: "hsl(var(--popover))",
@@ -389,6 +405,7 @@ let componentsControl: ControlGrid | null = null;
 let cogRasterControl: CogLayerControl | null = null;
 let flatGeobufControl: AddVectorControl | null = null;
 let pmtilesControl: PMTilesLayerControl | null = null;
+let searchControl: SearchControl | null = null;
 let stacSearchControl: StacSearchControl | null = null;
 let zarrControl: ZarrLayerControl | null = null;
 let lidarControl: LidarControl | null = null;
@@ -400,6 +417,7 @@ let flatGeobufControlMounted = false;
 let cogRasterControlMounted = false;
 let geoTiffRasterOverlayMounted = false;
 let pmtilesControlMounted = false;
+let searchControlMounted = false;
 let stacSearchControlMounted = false;
 let zarrControlMounted = false;
 let lidarControlMounted = false;
@@ -416,6 +434,8 @@ let pluginActive = false;
 let componentsControlRevision = 0;
 let componentsConstructorsPromise: Promise<ComponentsConstructors> | null =
   null;
+let searchPlacesPanelVisible = false;
+const searchPlacesPanelListeners = new Set<() => void>();
 
 export interface CogRasterLayerOptions {
   url: string;
@@ -623,6 +643,7 @@ const getComponentsConstructors = (): Promise<ComponentsConstructors> => {
       LidarControl: LidarControlClass,
       LidarLayerAdapter: LidarLayerAdapterClass,
       PMTilesLayerControl: PMTilesLayerControlClass,
+      SearchControl: SearchControlClass,
       StacSearchControl: StacSearchControlClass,
       ZarrLayerControl: ZarrLayerControlClass,
     }) => ({
@@ -634,6 +655,7 @@ const getComponentsConstructors = (): Promise<ComponentsConstructors> => {
       LidarControl: LidarControlClass,
       LidarLayerAdapter: LidarLayerAdapterClass,
       PMTilesLayerControl: PMTilesLayerControlClass,
+      SearchControl: SearchControlClass,
       StacSearchControl: StacSearchControlClass,
       ZarrLayerControl: ZarrLayerControlClass,
     }),
@@ -695,6 +717,7 @@ export const maplibreComponentsPlugin: GeoLibrePlugin = {
     teardownGeoTiffRasterOverlay(app);
     teardownFlatGeobufControl(app);
     teardownPMTilesControl(app);
+    teardownSearchControl(app);
     teardownStacSearchControl(app);
     teardownZarrControl(app);
     teardownLidarControl(app);
@@ -744,6 +767,27 @@ export async function addCogRasterLayer(
 
 export function openPMTilesLayerPanel(app: GeoLibreAppAPI): void {
   void openStandalonePMTilesControl(app);
+}
+
+// The standalone Search panel is intentionally independent from the
+// ControlGrid search sub-control so it can be used from the Controls menu.
+export function openSearchPlacesPanel(app: GeoLibreAppAPI): void {
+  void openStandaloneSearchControl(app);
+}
+
+export function closeSearchPlacesPanel(): void {
+  hideSearchControl();
+}
+
+export function isSearchPlacesPanelVisible(): boolean {
+  return searchPlacesPanelVisible;
+}
+
+export function subscribeSearchPlacesPanel(
+  listener: () => void,
+): () => void {
+  searchPlacesPanelListeners.add(listener);
+  return () => searchPlacesPanelListeners.delete(listener);
 }
 
 export function openStacSearchLayerPanel(app: GeoLibreAppAPI): void {
@@ -843,6 +887,30 @@ async function openStandalonePMTilesControl(
   setTimeout(() => {
     pmtilesControl?.show();
     pmtilesControl?.expand();
+  }, 0);
+  return true;
+}
+
+async function openStandaloneSearchControl(
+  app: GeoLibreAppAPI,
+): Promise<boolean> {
+  const { SearchControl: SearchControlClass } = await getComponentsConstructors();
+
+  searchControl ??= createSearchControl(SearchControlClass);
+
+  if (!searchControlMounted) {
+    const added = app.addMapControl(searchControl, searchControlPosition);
+    if (!added) {
+      searchControl = null;
+      return false;
+    }
+    searchControlMounted = true;
+  }
+
+  setTimeout(() => {
+    searchControl?.show();
+    searchControl?.expand();
+    setSearchPlacesPanelVisible(true);
   }, 0);
   return true;
 }
@@ -1207,6 +1275,14 @@ function createPMTilesControl(
   return control;
 }
 
+function createSearchControl(
+  SearchControlClass: SearchControlConstructor,
+): SearchControl {
+  const control = new SearchControlClass(SEARCH_OPTIONS);
+  control.on("collapse", hideSearchControl);
+  return control;
+}
+
 function createStacSearchControl(
   StacSearchControlClass: StacSearchControlConstructor,
 ): StacSearchControl {
@@ -1288,6 +1364,15 @@ function teardownPMTilesControl(app: GeoLibreAppAPI): void {
   pmtilesControlMounted = false;
 }
 
+function teardownSearchControl(app: GeoLibreAppAPI): void {
+  if (searchControl && searchControlMounted) {
+    app.removeMapControl(searchControl);
+  }
+  searchControl = null;
+  searchControlMounted = false;
+  setSearchPlacesPanelVisible(false);
+}
+
 function teardownStacSearchControl(app: GeoLibreAppAPI): void {
   stacSearchStoreUnsubscribe?.();
   stacSearchStoreUnsubscribe = null;
@@ -1296,6 +1381,19 @@ function teardownStacSearchControl(app: GeoLibreAppAPI): void {
   }
   stacSearchControl = null;
   stacSearchControlMounted = false;
+}
+
+function hideSearchControl(): void {
+  searchControl?.hide();
+  setSearchPlacesPanelVisible(false);
+}
+
+function setSearchPlacesPanelVisible(visible: boolean): void {
+  if (searchPlacesPanelVisible === visible) return;
+  searchPlacesPanelVisible = visible;
+  for (const listener of searchPlacesPanelListeners) {
+    listener();
+  }
 }
 
 function teardownZarrControl(app: GeoLibreAppAPI): void {

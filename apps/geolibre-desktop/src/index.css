@@ -697,6 +697,98 @@ body,
   accent-color: hsl(var(--primary));
 }
 
+.geolibre-search-control {
+  background-color: #fff !important;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.28);
+  color: #333 !important;
+  max-width: min(320px, calc(100vw - 32px));
+  overflow: visible;
+  position: relative;
+  z-index: 3;
+}
+
+.geolibre-search-control .maplibre-gl-search-input-wrapper {
+  background-color: #fff !important;
+  border-bottom: 1px solid #d9d9d9 !important;
+  box-sizing: border-box;
+  width: 100% !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-input {
+  background-color: #fff !important;
+  caret-color: #111;
+  color: #111 !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-input::placeholder {
+  color: #333 !important;
+  opacity: 1;
+}
+
+.geolibre-search-control .maplibre-gl-search-input:focus {
+  outline: none;
+}
+
+.geolibre-search-control .maplibre-gl-search-toggle {
+  background: #fff !important;
+  border-radius: 4px;
+  color: #333 !important;
+  height: 29px !important;
+  opacity: 1;
+  width: 29px !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-toggle svg {
+  height: 16px;
+  width: 16px;
+}
+
+.geolibre-search-control .maplibre-gl-search-toggle:hover {
+  background: #f2f2f2 !important;
+  color: #000 !important;
+  opacity: 1;
+}
+
+.geolibre-search-control .maplibre-gl-search-icon,
+.geolibre-search-control .maplibre-gl-search-clear,
+.geolibre-search-control .maplibre-gl-search-collapse {
+  color: #333 !important;
+  opacity: 1;
+}
+
+.geolibre-search-control .maplibre-gl-search-clear:hover,
+.geolibre-search-control .maplibre-gl-search-collapse:hover {
+  color: #000 !important;
+  opacity: 1;
+}
+
+.geolibre-search-control .maplibre-gl-search-results {
+  background-color: #fff !important;
+  border: 1px solid #d9d9d9;
+  border-top: 0;
+  color: #111 !important;
+  max-width: min(320px, calc(100vw - 32px));
+}
+
+.geolibre-search-control .maplibre-gl-search-result {
+  border-bottom-color: #e5e5e5 !important;
+  color: #111 !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-result:hover {
+  background-color: #f2f2f2 !important;
+  color: #000 !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-result:hover * {
+  color: #000 !important;
+}
+
+.geolibre-search-control .maplibre-gl-search-result-detail {
+  color: #555 !important;
+  opacity: 1;
+}
+
 .geolibre-stac-search-control {
   background-color: hsl(var(--popover)) !important;
   color: hsl(var(--popover-foreground)) !important;
