@@ -439,6 +439,7 @@ const searchPlacesPanelListeners = new Set<() => void>();
 
 export interface CogRasterLayerOptions {
   url: string;
+  data?: ArrayBuffer;
   name?: string;
   bands?: string;
   colormap?: CogLayerControlOptions["defaultColormap"];
@@ -749,10 +750,11 @@ export async function addCogRasterLayer(
   app: GeoLibreAppAPI,
   options: CogRasterLayerOptions,
 ): Promise<string> {
-  if (shouldUseGenericGeoTiffRenderer(options.url)) {
+  if (options.data || shouldUseGenericGeoTiffRenderer(options.url)) {
     return addGeoTiffRasterLayer(app, options);
   }
 
+  ensureCogRasterMercatorProjection(app);
   const control = await ensureCogRasterControl(app);
   if (!control) {
     throw new Error("The COG raster layer control could not be added to the map.");
@@ -761,6 +763,7 @@ export async function addCogRasterLayer(
   try {
     return await addLayerWithCogRasterControl(control, options);
   } catch (error) {
+    if (isRemoteHttpUrl(options.url)) throw error;
     return addGeoTiffRasterLayer(app, options, error);
   }
 }
@@ -1698,14 +1701,18 @@ async function addGeoTiffRasterLayer(
   const id = createGeoTiffRasterLayerId();
   const url = options.url.trim();
   const name = options.name?.trim() || layerNameFromUrl(url, id);
-  const rasterInput = await fetchGeoTiffRasterInput(app, url, cause);
+  const rasterInput = await fetchGeoTiffRasterInput(app, options, url, cause);
   const { bounds, raster } = await loadGeoTiffRasterData(rasterInput, options);
+  const { data: _data, ...stateOptions } = options;
   const state: GeoTiffRasterLayerState = {
     bounds,
     id,
     name,
     opacity: options.opacity ?? 1,
-    options,
+    options: {
+      ...stateOptions,
+      url,
+    },
     raster,
     url,
     visible: true,
@@ -1781,9 +1788,12 @@ async function ensureGeoTiffRasterOverlay(
 
 async function fetchGeoTiffRasterInput(
   app: GeoLibreAppAPI,
+  options: CogRasterLayerOptions,
   url: string,
   cause: unknown,
 ): Promise<ArrayBuffer> {
+  if (options.data) return options.data;
+
   if (app.fetchArrayBuffer) {
     try {
       return await app.fetchArrayBuffer(url);
@@ -1864,18 +1874,16 @@ function createGeoTiffReprojectionFns(
 ): RasterLayerProps["reprojectionFns"] {
   const [originX, originY] = image.getOrigin();
   const [resolutionX, resolutionY] = image.getResolution();
-  const width = image.getWidth();
-  const height = image.getHeight();
   const converter = proj4(sourceProjection, "EPSG:4326");
 
   return {
     forwardTransform: (x, y) => [
-      originX + x * width * resolutionX,
-      originY + y * height * resolutionY,
+      originX + x * resolutionX,
+      originY + y * resolutionY,
     ],
     inverseTransform: (x, y) => [
-      (x - originX) / (width * resolutionX),
-      (y - originY) / (height * resolutionY),
+      (x - originX) / resolutionX,
+      (y - originY) / resolutionY,
     ],
     forwardReproject: (x, y) => converter.forward([x, y]),
     inverseReproject: (x, y) => converter.inverse([x, y]),
@@ -2094,6 +2102,16 @@ function configureCogRasterControl(
     mutableControl._options.beforeId = options.beforeLayerId || "";
   }
   mutableControl._render?.();
+}
+
+function ensureCogRasterMercatorProjection(app: GeoLibreAppAPI): void {
+  try {
+    const map = app.getMap?.();
+    if (!map || map.getProjection()?.type === "mercator") return;
+    map.setProjection({ type: "mercator" });
+  } catch {
+    // MapLibre can reject projection changes while the style is still settling.
+  }
 }
 
 function createFlatGeobufStoreLayer(
@@ -3168,11 +3186,8 @@ function shouldUseGenericGeoTiffRenderer(url: string): boolean {
 
   try {
     const parsedUrl = new URL(url);
-    const isGitHubRelease =
-      parsedUrl.hostname === "github.com" &&
-      parsedUrl.pathname.includes("/releases/download/");
     const isTiff = /\.tiff?$/i.test(parsedUrl.pathname);
-    return isTiff && (isGitHubRelease || parsedUrl.protocol === "file:");
+    return isTiff && parsedUrl.protocol === "file:";
   } catch {
     return isTiffPath;
   }

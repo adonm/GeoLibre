@@ -79,6 +79,10 @@ interface AddDataDialogProps {
 type VectorMode = "vector-file" | "geojson-url" | "vector-tiles";
 type RasterMode = "tiles" | "cog-url" | "file";
 type RasterColormap = NonNullable<CogRasterLayerOptions["colormap"]>;
+type SelectedRasterFile = {
+  data: ArrayBuffer;
+  path: string;
+};
 
 const KIND_LABELS: Record<AddDataKind, string> = {
   xyz: "Add XYZ Layer",
@@ -316,9 +320,8 @@ export function AddDataDialog({
   const [rasterMin, setRasterMin] = useState("0");
   const [rasterMax, setRasterMax] = useState("255");
   const [rasterNodata, setRasterNodata] = useState("");
-  const [selectedRasterPath, setSelectedRasterPath] = useState<string | null>(
-    null,
-  );
+  const [selectedRasterFile, setSelectedRasterFile] =
+    useState<SelectedRasterFile | null>(null);
   const [selectedMbtiles, setSelectedMbtiles] = useState<{
     metadata: MbtilesMetadata;
     path: string;
@@ -386,7 +389,7 @@ export function AddDataDialog({
     setRasterMin("0");
     setRasterMax("255");
     setRasterNodata("");
-    setSelectedRasterPath(null);
+    setSelectedRasterFile(null);
     setSelectedMbtiles(null);
     setMbtilesSourceLayers("");
     setArcgisLayerType("feature");
@@ -605,22 +608,31 @@ export function AddDataDialog({
 
   const handleChooseRasterFile = async () => {
     setError(null);
-    const result = await openLocalDataFileWithFallback({
-      filters: [
-        {
-          name: "GeoTIFF raster",
-          extensions: ["tif", "tiff"],
-        },
-      ],
-      accept: ".tif,.tiff",
-    });
-    if (!result) return;
-    setSelectedRasterPath(result.path);
-    setLayerName((current) =>
-      current.trim() && current !== "Raster Layer"
-        ? current
-        : layerNameFromPath(result.path, "Raster Layer"),
-    );
+    try {
+      const result = await openLocalDataFileWithFallback({
+        filters: [
+          {
+            name: "GeoTIFF raster",
+            extensions: ["tif", "tiff"],
+          },
+        ],
+        accept: ".tif,.tiff",
+        readBinary: true,
+      });
+      if (!result) return;
+      if (!result.data) throw new Error("Raster file data is missing.");
+      setSelectedRasterFile({
+        data: result.data,
+        path: result.path,
+      });
+      setLayerName((current) =>
+        current.trim() && current !== "Raster Layer"
+          ? current
+          : layerNameFromPath(result.path, "Raster Layer"),
+      );
+    } catch (err) {
+      setError(errorMessage(err, "Could not read raster file."));
+    }
   };
 
   const handleChooseMbtilesFile = async () => {
@@ -884,7 +896,7 @@ export function AddDataDialog({
         return;
       }
 
-      if (!selectedRasterPath) throw new Error("Choose a raster file.");
+      if (!selectedRasterFile) throw new Error("Choose a raster file.");
       const rescaleMin = parseRequiredNumber(rasterMin, "minimum value");
       const rescaleMax = parseRequiredNumber(rasterMax, "maximum value");
       if (rescaleMax <= rescaleMin) {
@@ -894,12 +906,13 @@ export function AddDataDialog({
         bands: rasterBands.trim() || "1",
         beforeLayerId: beforeLayer,
         colormap: rasterColormap,
+        data: selectedRasterFile.data,
         name,
         nodata: parseOptionalNumber(rasterNodata, "nodata value"),
         opacity: 1,
         rescaleMax,
         rescaleMin,
-        url: selectedRasterPath,
+        url: selectedRasterFile.path,
       });
       closeDialog();
     } catch (err) {
@@ -1404,8 +1417,8 @@ export function AddDataDialog({
                     Choose file
                   </Button>
                   <span className="min-w-0 truncate text-xs text-muted-foreground">
-                    {selectedRasterPath
-                      ? fileNameFromPath(selectedRasterPath)
+                    {selectedRasterFile
+                      ? fileNameFromPath(selectedRasterFile.path)
                       : "No file selected"}
                   </span>
                 </div>

@@ -27,6 +27,7 @@ interface FileDialogFilter {
 interface LocalDataFileOptions {
   filters: FileDialogFilter[];
   accept: string;
+  readBinary?: boolean;
   readText?: boolean;
 }
 
@@ -572,6 +573,7 @@ async function saveBinaryFileBrowser(
 export async function openLocalDataFileWithFallback(
   options: LocalDataFileOptions,
 ): Promise<{
+  data?: ArrayBuffer;
   path: string;
   text?: string;
 } | null> {
@@ -581,22 +583,30 @@ export async function openLocalDataFileWithFallback(
       filters: options.filters,
     });
     if (!selected || typeof selected !== "string") return null;
+    const data = options.readBinary
+      ? toArrayBuffer(await readFile(selected))
+      : undefined;
     const text = options.readText ? await readTextFile(selected) : undefined;
-    return { path: selected, text };
+    return { data, path: selected, text };
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = options.accept;
     input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) {
-        resolve(null);
-        return;
+      try {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(null);
+          return;
+        }
+        const data = options.readBinary ? await file.arrayBuffer() : undefined;
+        const text = options.readText ? await file.text() : undefined;
+        resolve({ data, path: file.name, text });
+      } catch (error) {
+        reject(error);
       }
-      const text = options.readText ? await file.text() : undefined;
-      resolve({ path: file.name, text });
     };
     input.click();
   });
