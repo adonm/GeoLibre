@@ -32,6 +32,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { readDir, readFile } from "@tauri-apps/plugin-fs";
 import type { RefObject } from "react";
 import { useEffect, useSyncExternalStore } from "react";
+import { bundledPluginManifestPaths } from "virtual:bundled-plugins";
 import { loadExternalPlugins } from "../lib/external-plugins";
 import { mergeStringLists } from "../lib/string-lists";
 import {
@@ -174,6 +175,25 @@ export function useExternalPluginsReady(): boolean {
   );
 }
 
+// Manifest URLs for plugins baked into the build under public/plugins/<id>/.
+// Resolved against the app origin and base so they fetch same-origin on both
+// the web build and the desktop build (which serves the same frontend from
+// tauri://localhost, allowed by `connect-src 'self'`). These are injected at
+// load time rather than stored in Settings, so a baked-in plugin always loads
+// and cannot be removed by the user. The URL loader skips the scheme allow-list
+// applied to user/project URLs, so the desktop tauri:// origin is accepted.
+function bundledPluginManifestUrls(): string[] {
+  if (typeof window === "undefined") return [];
+  // Resolve against a base that always ends in "/" so a non-trailing-slash
+  // BASE_URL (e.g. "/geolibre") cannot mangle the path into "/geolibreplugins".
+  const base = import.meta.env.BASE_URL.endsWith("/")
+    ? import.meta.env.BASE_URL
+    : `${import.meta.env.BASE_URL}/`;
+  return bundledPluginManifestPaths.map(
+    (path) => new URL(path, new URL(base, window.location.href)).href,
+  );
+}
+
 function ensureExternalPluginsLoadedWithSettings(
   desktopSettings: ReturnType<
     typeof useDesktopSettingsStore.getState
@@ -181,6 +201,7 @@ function ensureExternalPluginsLoadedWithSettings(
   projectPluginManifestUrls: string[],
 ): Promise<void> {
   const pluginManifestUrls = mergeStringLists(
+    bundledPluginManifestUrls(),
     desktopSettings.pluginManifestUrls,
     projectPluginManifestUrls,
   );
