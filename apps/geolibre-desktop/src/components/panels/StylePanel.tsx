@@ -40,6 +40,7 @@ import {
   type RefObject,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { getIsMobileViewport } from "../../hooks/useIsMobileViewport";
@@ -47,6 +48,12 @@ import { getIsMobileViewport } from "../../hooks/useIsMobileViewport";
 interface StylePanelProps {
   mapControllerRef: RefObject<MapController | null>;
   onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  /**
+   * When this flips to `true` the panel collapses to its thin rail (it is not
+   * unmounted). Used to clear room when the notebook opens beside the map; the
+   * user can still expand it again.
+   */
+  autoCollapse?: boolean;
 }
 
 function isRasterPaintLayer(type: LayerType): boolean {
@@ -804,6 +811,7 @@ function RasterStyleSlider({
 export function StylePanel({
   mapControllerRef,
   onResizeStart,
+  autoCollapse = false,
 }: StylePanelProps) {
   const selectedLayerId = useAppStore((s) => s.selectedLayerId);
   const layers = useAppStore((s) => s.layers);
@@ -812,6 +820,24 @@ export function StylePanel({
   const updateLayer = useAppStore((s) => s.updateLayer);
   const moveLayer = useAppStore((s) => s.moveLayer);
   const [isCollapsed, setIsCollapsed] = useState(getIsMobileViewport);
+  // Collapse to the rail when `autoCollapse` flips on (e.g. the notebook opens),
+  // and restore the prior expand/collapse state when it flips back off (notebook
+  // closes). Both act only on the transition so the user can still toggle the
+  // panel manually while `autoCollapse` stays on. `isCollapsed` is in the deps
+  // only to keep the captured value fresh; the guards make pure `isCollapsed`
+  // changes a no-op while `autoCollapse` is stable.
+  const prevAutoCollapse = useRef(autoCollapse);
+  const collapsedBeforeAuto = useRef(isCollapsed);
+  useEffect(() => {
+    const wasAuto = prevAutoCollapse.current;
+    prevAutoCollapse.current = autoCollapse;
+    if (autoCollapse && !wasAuto) {
+      collapsedBeforeAuto.current = isCollapsed;
+      setIsCollapsed(true);
+    } else if (!autoCollapse && wasAuto) {
+      setIsCollapsed(collapsedBeforeAuto.current);
+    }
+  }, [autoCollapse, isCollapsed]);
   const [draftBeforeId, setDraftBeforeId] = useState("");
   const [draftColorExpression, setDraftColorExpression] = useState("");
   const [draftHeightExpression, setDraftHeightExpression] = useState("");
