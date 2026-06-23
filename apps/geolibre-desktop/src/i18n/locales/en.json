@@ -1719,7 +1719,17 @@
     "resize": "Resize panel",
     "moveLeft": "Move panel to the left",
     "moveRight": "Move panel to the right",
+    "mergeIntoStyleRail": "Merge into the Style rail",
+    "mergeIntoLayersRail": "Merge into the Layers rail",
+    "detach": "Detach as a movable panel",
     "collapsedLabel": "{{title}} (collapsed)"
+  },
+  "sharedRail": {
+    "label": "Sidebar",
+    "layers": "Layers",
+    "style": "Style",
+    "expand": "Expand {{title}}",
+    "collapse": "Collapse {{title}}"
   },
   "style": {
     "labels": {
