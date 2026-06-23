@@ -23,6 +23,7 @@ import type {
   CogLayerInfo,
   BookmarkControl,
   BookmarkControlOptions,
+  BookmarkExportMode,
   ColorbarGuiControl,
   ColorbarGuiControlOptions,
   ControlGrid,
@@ -296,15 +297,29 @@ const MEASURE_OPTIONS = {
 } satisfies MeasureControlOptions;
 
 /**
- * Label for the bookmark "capture state" checkbox. Default is English; the
- * desktop shell pushes a translated value via {@link setBookmarkCaptureLabel}
- * since this package is framework-agnostic and has no react-i18next access.
+ * User-facing strings for the BookmarkControl. Defaults are English; the
+ * desktop shell pushes translated values via {@link setBookmarkLabels} since
+ * this package is framework-agnostic and has no react-i18next access.
  */
-let bookmarkCaptureLabel = "Include visible layers";
+const bookmarkLabels = {
+  captureStateLabel: "Include complete layer state (active, inactive, and layer order)",
+  captureStateTooltip:
+    "Applies to the bookmark you save next, not as a global setting. Leave it on to restore exactly this layer arrangement later.",
+  exportLabel: "Export",
+  exportSelectedLabel: "Export Selected",
+  exportAllLabel: "Export All",
+};
 
-/** Override the bookmark capture-state checkbox label with translated text. */
-export function setBookmarkCaptureLabel(label: string): void {
-  if (label) bookmarkCaptureLabel = label;
+/** Override the BookmarkControl labels with translated text. */
+export function setBookmarkLabels(
+  labels: Partial<typeof bookmarkLabels>
+): void {
+  for (const [key, value] of Object.entries(labels)) {
+    // Only overwrite when the caller actually supplied the key; an omitted key
+    // keeps the English default rather than being blanked out.
+    if (value !== undefined)
+      bookmarkLabels[key as keyof typeof bookmarkLabels] = value;
+  }
 }
 
 /**
@@ -365,10 +380,14 @@ const BOOKMARK_OPTIONS = {
   position: bookmarkControlPosition,
   storageKey: "geolibre-bookmarks",
   // Resizable panel and drag reordering are on by default upstream; enable
-  // per-bookmark export selection and visible-layer capture here. The
-  // capture-checkbox label is applied per-instance in createBookmarkControl so
-  // it can pick up the translated string.
+  // per-bookmark export selection and visible-layer capture here. Labels and
+  // the capture tooltip are applied per-instance in createBookmarkControl so
+  // they pick up the translated strings.
   selectable: true,
+  // Always offer an explicit "Export All" plus a contextual "Export Selected"
+  // (issue #794), and drop the low-value zoom/date metadata from each card.
+  showExportAll: true,
+  showMetadata: false,
   captureState: captureVisibleLayers,
   restoreState: restoreVisibleLayers,
 } satisfies BookmarkControlOptions;
@@ -2726,7 +2745,11 @@ function createBookmarkControl(
 ): BookmarkControl {
   const control = new BookmarkControlClass({
     ...BOOKMARK_OPTIONS,
-    captureStateLabel: bookmarkCaptureLabel,
+    captureStateLabel: bookmarkLabels.captureStateLabel,
+    captureStateTooltip: bookmarkLabels.captureStateTooltip,
+    exportLabel: bookmarkLabels.exportLabel,
+    exportSelectedLabel: bookmarkLabels.exportSelectedLabel,
+    exportAllLabel: bookmarkLabels.exportAllLabel,
   });
   routeBookmarkFileIoThroughHost(control, app);
   return control;
@@ -2748,11 +2771,14 @@ function routeBookmarkFileIoThroughHost(
   // of BookmarkControl as of maplibre-gl-components@0.21.0. If a future version
   // renames them, the overrides below silently stop being called and file I/O
   // regresses to the WebView-incompatible Blob/file-input path — so warn loudly
-  // to flag it when bumping the dependency.
+  // to flag it when bumping the dependency. The public `exportBookmarks(mode?)`
+  // signature is load-bearing too (added in 0.22.6): if a future version drops
+  // the `mode` arg, "Export Selected" would silently export everything, since
+  // the extra argument becomes a no-op. Re-verify both when bumping.
   const io = control as unknown as {
-    _exportToFile?: () => void;
+    _exportToFile?: (mode?: BookmarkExportMode) => void;
     _importFromFile?: () => void;
-    exportBookmarks: () => string;
+    exportBookmarks: (mode?: BookmarkExportMode) => string;
     importBookmarks: (bookmarks: MapBookmark[]) => unknown;
   };
   if (!io._exportToFile || !io._importFromFile) {
@@ -2773,12 +2799,16 @@ function routeBookmarkFileIoThroughHost(
     promptName: true,
   };
 
-  io._exportToFile = () => {
+  io._exportToFile = (mode) => {
     if (!app.exportTextFile) {
-      originalExport();
+      originalExport(mode);
       return;
     }
-    app.exportTextFile("bookmarks.json", io.exportBookmarks(), dialogOptions);
+    app.exportTextFile(
+      "bookmarks.json",
+      io.exportBookmarks(mode),
+      dialogOptions
+    );
   };
 
   io._importFromFile = () => {
