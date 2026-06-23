@@ -42,7 +42,7 @@ const SAMPLE_RASTER_DATASETS: RasterSampleDataset[] = [
 ];
 
 // This type mirrors undocumented private members of RasterControl from
-// maplibre-gl-raster (re-verified against v0.6.2). All access is optional (?.)
+// maplibre-gl-raster (re-verified against v0.6.3). All access is optional (?.)
 // so a rename in a future release degrades to a no-op rather than a crash --
 // re-verify these names AND the .mlr-control-close selector in
 // wireRasterCloseButton when bumping the dependency.
@@ -104,6 +104,56 @@ let rasterControlInterleaved = true;
 // raster layer id. Tracked here so they can be revoked when the raster is
 // removed; otherwise each would leak until the page unloads.
 const localBytesUrls = new Map<string, string>();
+
+/**
+ * Details of a local raster that the panel could not render because it is a
+ * striped (non-tiled) GeoTIFF rather than a tiled COG. Passed to a host handler
+ * registered via {@link setNonTiledRasterHandler}, which can offer to convert it
+ * to a COG (the conversion + UI live in the app layer, which has i18n and the
+ * client-side converter; this framework-agnostic package only detects the case).
+ */
+export interface NonTiledRasterRequest {
+  /** The failed layer's id. */
+  layerId: string;
+  /** The failed layer's display name (used for the converted layer too). */
+  name: string;
+  /** Reads the original uploaded bytes. Must be awaited before {@link dismiss},
+   * which revokes the underlying blob URL. */
+  readBytes: () => Promise<Uint8Array>;
+  /** Removes the failed layer from the map and the store. */
+  dismiss: () => void;
+}
+
+type NonTiledRasterHandler = (
+  request: NonTiledRasterRequest,
+) => void | Promise<void>;
+
+let nonTiledRasterHandler: NonTiledRasterHandler | null = null;
+// Layer ids currently being handled, so a repeated 'error' event for the same
+// failed layer does not prompt twice.
+const nonTiledInFlight = new Set<string>();
+
+/**
+ * Register (or clear, with `null`) a handler invoked when a local GeoTIFF fails
+ * to load because it is striped rather than tiled. The app uses this to offer an
+ * in-browser convert-to-COG flow. Only one handler is active at a time.
+ *
+ * @param handler - The handler, or `null` to unregister.
+ */
+export function setNonTiledRasterHandler(
+  handler: NonTiledRasterHandler | null,
+): void {
+  nonTiledRasterHandler = handler;
+}
+
+/** Whether a raster load error is the upstream "striped, not tiled" failure.
+ * maplibre-gl-raster (v0.6.3) rejects non-tiled GeoTIFFs with a message
+ * containing "not tiled"; this is the only signal it exposes, so the match is
+ * coupled to that wording. Re-verify it (and broaden if needed) when bumping the
+ * dependency -- a reworded message degrades to the plain error, not a crash. */
+function isNonTiledRasterError(error: Error | null | undefined): boolean {
+  return error != null && /not tiled/i.test(error.message);
+}
 
 /**
  * Opens the maplibre-gl-raster panel, mounting the control on first use.
@@ -471,9 +521,56 @@ function createRasterControl(
       localBytesUrls.delete(event.layerId);
     }
   });
+  // A striped (non-tiled) GeoTIFF cannot be streamed as tiles, so the upstream
+  // fails the layer with a "not tiled" error. Offer the registered host handler
+  // a chance to convert it to a COG instead of leaving the user with a blank,
+  // errored layer. See opengeos/GeoLibre#789.
+  control.on("error", (event) => {
+    if (!event.layerId || !nonTiledRasterHandler) return;
+    const layerId = event.layerId;
+    if (nonTiledInFlight.has(layerId)) return;
+    const info = control.getRaster(layerId);
+    // Only local files can be re-read and converted in the browser; remote
+    // non-tiled URLs keep the plain error.
+    if (!info || !isNonTiledRasterError(info.error) || info.source.kind !== "file") {
+      return;
+    }
+    const objectUrl = info.source.objectUrl;
+    const handler = nonTiledRasterHandler;
+    nonTiledInFlight.add(layerId);
+    // Invoke inside the promise chain so even a synchronous throw from the
+    // handler still clears the in-flight guard via finally. Clears once handling
+    // settles (converted, cancelled, or failed) so a later retry can prompt
+    // again.
+    void Promise.resolve()
+      .then(() =>
+        handler({
+          layerId,
+          name: info.name,
+          readBytes: async () => {
+            const response = await fetch(objectUrl);
+            if (!response.ok) {
+              throw new Error(
+                `Failed to read raster bytes: ${response.status}`,
+              );
+            }
+            return new Uint8Array(await response.arrayBuffer());
+          },
+          dismiss: () => {
+            // removeRaster emits 'rasterremove', which syncs the removal into
+            // the store and revokes any retained blob URL.
+            control.removeRaster(layerId);
+          },
+        }),
+      )
+      .catch((error: unknown) =>
+        console.error("[GeoLibre] Non-tiled raster handler failed", error),
+      )
+      .finally(() => nonTiledInFlight.delete(layerId));
+  });
   // syncRasterLayersToStore re-reads getState().collapsed when these fire.
   // Safe: expand()/collapse() delegate to toggle(), which flips
-  // _state.collapsed BEFORE emitting the event (verified against v0.6.1) --
+  // _state.collapsed BEFORE emitting the event (verified against v0.6.3) --
   // re-verify that ordering when bumping the dependency.
   const panelStateSyncHandler: RasterControlEventHandler = () =>
     syncRasterLayersToStoreForRuntime(control);
