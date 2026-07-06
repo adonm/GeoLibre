@@ -196,6 +196,72 @@ export async function listWasmToolManifests(): Promise<WhiteboxTool[]> {
  * @param wasmTools - Every WASM tool manifest ({@link listWasmToolManifests}).
  * @returns Catalog tools with WASM parameters, plus WASM-only GeoLibre tools.
  */
+/** Scalar catalog kinds trusted to correct a mislabeled WASM manifest param. */
+const CATALOG_SCALAR_KINDS = new Set(["string", "int", "double"]);
+
+/**
+ * Whether the catalog's kind should override the WASM manifest's for a param
+ * they both declare (matched by name). The WASM binary's manifest occasionally
+ * mislabels a free-form scalar parameter: `extract_by_attribute`'s `statement`
+ * expression is typed `bool` (rendering a checkbox) and `field_calculator`'s
+ * `expression` is typed as a vector input (rendering a second layer picker),
+ * so neither exposes a text field to type the expression (GeoLibre#1073). When
+ * the Python sidecar's catalog types the same-named param as a plain scalar
+ * (string/int/double) but the WASM manifest makes it a `bool` (any name) or a
+ * dataset **input** whose *name* marks it as a free-text expression, we trust
+ * the catalog so the dialog renders (and the runner serializes) a text input.
+ *
+ * The scope is deliberately tight:
+ * - A `bool` mislabel is always safe to correct (no dataset is involved), which
+ *   covers `extract_by_attribute.statement`.
+ * - A dataset **input** is only downgraded when its name is `expression`/
+ *   `statement` (mirroring the upstream wbcore `looks_like_expression` fix),
+ *   which covers `field_calculator.expression` without downgrading a genuine
+ *   raster/vector/lidar input that the catalog merely mistyped as a scalar.
+ * - Outputs are never touched: diverting a real dataset output into the
+ *   plain-arg path would break its run.
+ *
+ * Enums/dropdowns and already-matching kinds are left untouched.
+ *
+ * @param param - The WASM manifest param (its name gates the input case).
+ * @param wasmKind - The kind derived from the WASM manifest param.
+ * @param catalogKind - The kind the catalog declares for the same-named param.
+ * @returns `true` when the catalog kind should replace the WASM kind.
+ */
+function shouldPreferCatalogKind(
+  param: WhiteboxToolParameter,
+  wasmKind: string,
+  catalogKind: string | undefined,
+): boolean {
+  if (!catalogKind || catalogKind === wasmKind) return false;
+  if (!CATALOG_SCALAR_KINDS.has(catalogKind)) return false;
+  if (wasmKind === "bool") return true;
+  return wasmKind.endsWith("_in") && /\b(expression|statement)\b/i.test(param.name);
+}
+
+/**
+ * Reconcile one tool's WASM manifest params against the catalog's. The WASM
+ * params win (names and set), but a same-named catalog param corrects a WASM
+ * kind that mislabels a scalar as a dataset/bool (see {@link shouldPreferCatalogKind}).
+ */
+function reconcileToolParams(
+  catalogParams: WhiteboxToolParameter[] | undefined,
+  wasmParams: WhiteboxToolParameter[] | undefined,
+): WhiteboxToolParameter[] {
+  const catalogByName = new Map(
+    (catalogParams ?? []).map((param) => [param.name, param] as const),
+  );
+  return (wasmParams ?? []).map((param) => {
+    const catalogParam = catalogByName.get(param.name);
+    if (!catalogParam) return param;
+    const catalogKind = paramKind(catalogParam);
+    if (shouldPreferCatalogKind(param, paramKind(param), catalogKind)) {
+      return { ...param, kind: catalogKind as WhiteboxToolParameter["kind"] };
+    }
+    return param;
+  });
+}
+
 export function mergeWasmToolManifests(
   catalogTools: WhiteboxTool[],
   wasmTools: WhiteboxTool[],
@@ -211,8 +277,13 @@ export function mergeWasmToolManifests(
     // and for the tool's provenance; keep only the catalog's display metadata
     // (name, category, …). Preserving `source` matters so a GeoLibre-authored
     // tool that also has a catalog stub keeps its "geolibre" marker for the
-    // source filter.
-    return { ...tool, params: wasm.params, source: wasm.source ?? tool.source };
+    // source filter. A same-named catalog param still corrects a WASM kind that
+    // mislabels a scalar expression as a dataset/bool (GeoLibre#1073).
+    return {
+      ...tool,
+      params: reconcileToolParams(tool.params, wasm.params),
+      source: wasm.source ?? tool.source,
+    };
   });
   const geolibreOnly = [...wasmById.values()].filter(
     (tool) => tool.source === "geolibre",
@@ -247,6 +318,60 @@ function paramKind(p: WhiteboxToolParameter): string {
   if (role === "input") return datasetParameterKind(dataKind, "in");
   if (role === "output") return datasetParameterKind(dataKind, "out");
   return dataKind;
+}
+
+/**
+ * Extension (without the dot) the WASM runner should give a `file_out` file so
+ * the tool's own format check passes. Whitebox tools infer a table/report
+ * format from the output path's extension, so we honor the extension of the
+ * user-chosen output path; when none is present we sniff the intended text
+ * format from the parameter's name/description (e.g. an "Output JSON report
+ * path."), default a `table` output to CSV, and fall back to an opaque `.dat`.
+ *
+ * @param param - The output parameter (carries `data_kind`/`schema`).
+ * @param requested - The user-chosen output path, if any.
+ * @returns A lowercase extension without a leading dot (e.g. `csv`, `json`, `dat`).
+ */
+export function fileOutputTargetExtension(
+  param: WhiteboxToolParameter,
+  requested: unknown,
+): string {
+  if (typeof requested === "string") {
+    const match = requested.match(/\.([A-Za-z0-9]+)$/);
+    if (match) return match[1].toLowerCase();
+  }
+  return outputTextFormatHint(param) ?? "dat";
+}
+
+/**
+ * The text/tabular output format a `file_out` parameter declares through its
+ * name, description, or `table` data kind, as a bare extension (`csv`/`html`/
+ * `json`), or `null` when nothing recognizable is found. Shared by the WASM
+ * runner's {@link fileOutputTargetExtension} and the dialog's default-name and
+ * download-naming code so the two hint lists cannot drift apart.
+ *
+ * @param param - The output parameter.
+ * @returns `"csv" | "html" | "json"`, or `null` if no text format is implied.
+ */
+export function outputTextFormatHint(
+  param: WhiteboxToolParameter,
+): string | null {
+  const hint = `${param.name ?? ""} ${param.description ?? ""} ${param.type ?? ""}`;
+  if (/\bcsv\b/i.test(hint)) return "csv";
+  if (/\bhtml\b/i.test(hint)) return "html";
+  if (/\bjson\b/i.test(hint)) return "json";
+  const schema =
+    param.schema && typeof param.schema === "object"
+      ? (param.schema as Record<string, unknown>)
+      : {};
+  const dataset =
+    schema.dataset && typeof schema.dataset === "object"
+      ? (schema.dataset as Record<string, unknown>)
+      : {};
+  const dataKind = String(
+    param.data_kind ?? dataset.kind ?? param.type ?? "",
+  ).toLowerCase();
+  return dataKind === "table" ? "csv" : null;
 }
 
 function isFeatureCollection(value: unknown): value is FeatureCollection {
@@ -436,9 +561,17 @@ export async function runWhiteboxToolWasm(
         args.push(`--${name}=/work/${file}`);
       }
     } else if (kind === "raster_out" || kind === "file_out") {
-      // file_out is treated as an opaque binary output (no GeoJSON parsing),
-      // mirroring how raster outputs are returned as raw bytes.
-      const ext = kind === "file_out" ? "dat" : "tif";
+      // raster_out is always a GeoTIFF. file_out is an opaque output whose
+      // format the tool infers from the output *extension* (e.g.
+      // vector_summary_statistics rejects any output path that isn't ".csv").
+      // Honor the extension of the user-chosen output path; fall back to CSV for
+      // a tabular output, else an opaque ".dat". Hardcoding ".dat" here made
+      // every such tool fail its own ".csv path" validation regardless of what
+      // the user typed (see GeoLibre#1074).
+      const ext =
+        kind === "file_out"
+          ? fileOutputTargetExtension(param, request.parameters[name])
+          : "tif";
       const file = `${outputBaseName(request.tool_id, name)}.${ext}`;
       outputs.push({ name, file, kind: "bytes" });
       args.push(`--${name}=/work/${file}`);

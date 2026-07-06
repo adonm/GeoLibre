@@ -13,6 +13,8 @@ import {
   runWhiteboxTool,
   runWhiteboxToolWasm,
   outputBaseName,
+  fileOutputTargetExtension,
+  outputTextFormatHint,
   type WhiteboxJob,
   type WhiteboxLayerInput,
   type WhiteboxTool,
@@ -248,10 +250,13 @@ function outputExtensionForParameter(param: WhiteboxToolParameter): string {
   if (kind === "raster_out") return ".tif";
   if (kind === "vector_out") return ".shp";
   if (kind === "lidar_out") return ".laz";
-  if (/\bcsv\b/i.test(`${param.name} ${param.type ?? ""}`)) return ".csv";
-  if (/\bhtml\b/i.test(`${param.name} ${param.type ?? ""}`)) return ".html";
-  if (/\bjson\b/i.test(`${param.name} ${param.type ?? ""}`)) return ".json";
-  return ".txt";
+  // Sniff the intended text format from the parameter's name/description/type
+  // via the same shared helper the WASM runner uses (e.g.
+  // vector_summary_statistics' output is an "Output CSV path"). Only the
+  // fallback differs: a friendly `.txt` here for a default filename suggestion,
+  // vs the opaque `.dat` the runner writes.
+  const hint = outputTextFormatHint(param);
+  return hint ? `.${hint}` : ".txt";
 }
 
 function defaultOutputName(
@@ -446,6 +451,14 @@ export function ProcessingDialog({
   const browsedInputsRef = useRef<
     Map<string, { name: string; bytes: Uint8Array; geojson?: FeatureCollection }>
   >(new Map());
+  // Parameters passed to each run, keyed by the resulting job id, so output
+  // naming can honor the output path the user actually typed (which the finished
+  // job does not carry). Keyed per job (not a single slot) so a rapid re-run
+  // cannot overwrite the entry a still-draining previous job is reading; the
+  // entry is deleted once its outputs are imported.
+  const runParametersByJobRef = useRef<Map<string, Record<string, unknown>>>(
+    new Map(),
+  );
 
   const selectedTool = useMemo(() => {
     const tool =
@@ -856,6 +869,11 @@ export function ProcessingDialog({
       const jobToolLabel = jobTool
         ? toolLabel(jobTool)
         : humanize(nextJob.tool_id);
+      // This job's own run parameters (not a shared slot), consumed once here so a
+      // concurrent re-run cannot repoint the output-path lookup below.
+      const runParameters =
+        runParametersByJobRef.current.get(nextJob.id) ?? {};
+      runParametersByJobRef.current.delete(nextJob.id);
       for (const [name, value] of entries) {
         const path = isFeatureCollection(value) ? "" : (outputPath(value) ?? "");
         const data = isFeatureCollection(value)
@@ -885,7 +903,19 @@ export function ProcessingDialog({
         const outKind = param ? parameterKind(param) : "";
         if (outKind === "file_out" || outKind === "vector_out") {
           const label = `${jobToolLabel} ${humanize(name)}`.replace(/\s+/g, "_");
-          downloadBytes(value, `${label}.${fileOutputExtension(value)}`);
+          // Prefer the content signature: a `vector_out` and most binary
+          // `file_out` formats (GeoParquet/FlatGeobuf/zipped Shapefile/PNG/
+          // PMTiles) are identifiable from their magic bytes. Only signature-less
+          // text formats (CSV/JSON/HTML) return `bin`; for those, fall back to
+          // the extension the tool was actually told to write — the user's typed
+          // output path, else the param's declared format (shared with the WASM
+          // runner via `fileOutputTargetExtension`).
+          const sniffed = fileOutputExtension(value);
+          const extension =
+            sniffed !== "bin" || outKind !== "file_out" || !param
+              ? sniffed
+              : fileOutputTargetExtension(param, runParameters[name]);
+          downloadBytes(value, `${label}.${extension}`);
         } else if (onAddRaster) {
           // Display name stays human-readable; the file name matches the actual
           // WASM output path (e.g. fill_depressions_wang_and_liu_output.tif), so
@@ -1007,9 +1037,18 @@ export function ProcessingDialog({
           requestAnimationFrame(() => requestAnimationFrame(resolve)),
         );
       }
-      setJob(
-        await (runLocal ? runWhiteboxToolWasm(request) : runWhiteboxTool(request)),
-      );
+      const nextJob = await (runLocal
+        ? runWhiteboxToolWasm(request)
+        : runWhiteboxTool(request));
+      // Record this run's parameters against its job id so output-download naming
+      // can later recover the output path the user typed (the job omits it). Only
+      // the WASM runner returns inline binary outputs that need this; the sidecar
+      // returns fetchable paths. `succeeded` is terminal for WASM, so a failed run
+      // adds nothing to clean up.
+      if (runLocal && nextJob.status === "succeeded") {
+        runParametersByJobRef.current.set(nextJob.id, parameters);
+      }
+      setJob(nextJob);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not start Whitebox tool.",

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  fileOutputTargetExtension,
   mergeWasmToolManifests,
   normalizeVectorOutputFormat,
   type WhiteboxTool,
@@ -115,6 +116,117 @@ describe("mergeWasmToolManifests", () => {
     assert.equal(merged[0].display_name, "Write GeoParquet");
   });
 
+  it("corrects a WASM param the manifest mislabels as a dataset/bool (#1073)", () => {
+    // The WASM binary types extract_by_attribute's `statement` expression as a
+    // bool (a checkbox) and field_calculator's `expression` as a vector input (a
+    // second layer picker), so neither exposes a text field. The catalog types
+    // both as plain strings; that scalar kind must win for matched param names.
+    const catalog: WhiteboxTool = {
+      id: "field_calculator",
+      display_name: "Field Calculator",
+      params: [
+        { name: "input", kind: "vector_in", required: true },
+        { name: "field", kind: "string", required: true },
+        { name: "field_type", kind: "int", required: false },
+        { name: "expression", kind: "string", required: true },
+        { name: "output", kind: "vector_out", required: false },
+      ],
+    };
+    const wasm: WhiteboxTool = {
+      id: "field_calculator",
+      params: [
+        { name: "input", data_kind: "vector", io_role: "input", required: true },
+        { name: "field", data_kind: "string", required: true },
+        // A real enum/dropdown: its kind must be left alone, not coerced to int.
+        {
+          name: "field_type",
+          schema: { kind: "enum", options: [{ value: "float" }] },
+          options: ["float", "integer", "text"],
+        },
+        // Mislabeled as a vector input; the catalog's `string` must win.
+        {
+          name: "expression",
+          data_kind: "vector",
+          io_role: "input",
+          required: true,
+        },
+        { name: "output", data_kind: "vector", io_role: "output" },
+      ],
+    };
+    const [tool] = mergeWasmToolManifests([catalog], [wasm]);
+    const byName = new Map(tool.params?.map((p) => [p.name, p]));
+    // Param names/set still come from the WASM manifest.
+    assert.deepEqual(
+      tool.params?.map((p) => p.name),
+      ["input", "field", "field_type", "expression", "output"],
+    );
+    // The mislabeled expression is corrected to a string (a text field).
+    assert.equal(byName.get("expression")?.kind, "string");
+    // A genuine enum keeps its dropdown; the catalog's `int` does not clobber it.
+    assert.equal(byName.get("field_type")?.kind, undefined);
+    // Matching dataset kinds are untouched (no spurious override).
+    assert.equal(byName.get("input")?.kind, undefined);
+  });
+
+  it("corrects a bool-typed expression param to a string (#1073)", () => {
+    const catalog: WhiteboxTool = {
+      id: "extract_by_attribute",
+      params: [
+        { name: "input", kind: "vector_in", required: true },
+        { name: "statement", kind: "string", required: true },
+        { name: "output", kind: "vector_out", required: true },
+      ],
+    };
+    const wasm: WhiteboxTool = {
+      id: "extract_by_attribute",
+      params: [
+        { name: "input", data_kind: "vector", io_role: "input", required: true },
+        { name: "statement", data_kind: "bool", required: true },
+        { name: "output", data_kind: "vector", io_role: "output", required: true },
+      ],
+    };
+    const [tool] = mergeWasmToolManifests([catalog], [wasm]);
+    const statement = tool.params?.find((p) => p.name === "statement");
+    assert.equal(statement?.kind, "string");
+  });
+
+  it("does not downgrade a genuine dataset input the catalog mistyped scalar", () => {
+    // Only expression/statement-named inputs are corrected; a real raster/vector
+    // input whose name is not an expression must keep its WASM dataset kind even
+    // if the catalog snapshot mistypes it as a string.
+    const catalog: WhiteboxTool = {
+      id: "some_tool",
+      params: [{ name: "input", kind: "string", required: true }],
+    };
+    const wasm: WhiteboxTool = {
+      id: "some_tool",
+      params: [
+        { name: "input", data_kind: "raster", io_role: "input", required: true },
+      ],
+    };
+    const [tool] = mergeWasmToolManifests([catalog], [wasm]);
+    assert.equal(tool.params?.[0]?.kind, undefined);
+  });
+
+  it("never overrides a WASM output param, even if the catalog types it scalar", () => {
+    // A scalar-typed catalog output must not divert a genuine WASM dataset
+    // output into the plain-arg path (which would break its run). Only inputs
+    // and bools are corrected.
+    const catalog: WhiteboxTool = {
+      id: "some_tool",
+      params: [{ name: "output", kind: "string", required: true }],
+    };
+    const wasm: WhiteboxTool = {
+      id: "some_tool",
+      params: [
+        { name: "output", data_kind: "vector", io_role: "output", required: true },
+      ],
+    };
+    const [tool] = mergeWasmToolManifests([catalog], [wasm]);
+    // Kind stays unset so parameterKind resolves the WASM vector_out.
+    assert.equal(tool.params?.[0]?.kind, undefined);
+  });
+
   it("does not append WASM-only Whitebox tools missing from the catalog", () => {
     const wasmOnlyWhitebox: WhiteboxTool = {
       id: "some_wasm_only_whitebox_tool",
@@ -139,5 +251,57 @@ describe("normalizeVectorOutputFormat", () => {
     assert.equal(normalizeVectorOutputFormat(""), "geojson");
     assert.equal(normalizeVectorOutputFormat(undefined), "geojson");
     assert.equal(normalizeVectorOutputFormat(42), "geojson");
+  });
+});
+
+describe("fileOutputTargetExtension", () => {
+  // vector_summary_statistics' output param, as the WASM manifest reports it.
+  const tableOutput = {
+    name: "output",
+    description: "Output CSV path.",
+    data_kind: "table",
+    io_role: "output",
+    schema: { dataset: { kind: "table" }, kind: "output", mode: "new" },
+  };
+
+  it("honors the extension of the user-chosen output path", () => {
+    // The bug in #1074: a hardcoded ".dat" made vector_summary_statistics reject
+    // its own output path. The user's ".csv" choice must reach the tool.
+    assert.equal(fileOutputTargetExtension(tableOutput, "test.csv"), "csv");
+    assert.equal(
+      fileOutputTargetExtension(tableOutput, "/Users/me/report.JSON"),
+      "json",
+    );
+  });
+
+  it("defaults a table output to csv when no path is given", () => {
+    assert.equal(fileOutputTargetExtension(tableOutput, undefined), "csv");
+    assert.equal(fileOutputTargetExtension(tableOutput, ""), "csv");
+  });
+
+  it("sniffs the format from the description when no path/table is given", () => {
+    // A JSON/HTML report param whose format lives only in its prose must not
+    // fall through to .dat when the output field is blank (would reproduce #1074
+    // for that tool).
+    const jsonReport = {
+      name: "output",
+      description: "Optional output report path (.json or .csv).",
+      data_kind: "file",
+      io_role: "output",
+    };
+    // csv wins over json in the hint order (both are valid for this tool).
+    assert.equal(fileOutputTargetExtension(jsonReport, undefined), "csv");
+    const jsonOnly = {
+      name: "match_report",
+      description: "Optional JSON output path for summary diagnostics.",
+      data_kind: "file",
+      io_role: "output",
+    };
+    assert.equal(fileOutputTargetExtension(jsonOnly, undefined), "json");
+  });
+
+  it("falls back to an opaque .dat for a non-table, non-text output", () => {
+    const opaque = { name: "output", data_kind: "file", io_role: "output" };
+    assert.equal(fileOutputTargetExtension(opaque, undefined), "dat");
   });
 });
