@@ -29,12 +29,15 @@ import {
 import type { MapController } from "@geolibre/map";
 import {
   applyMapboxStyleImport,
+  applyQmlImport,
   applySldImport,
   buildMapboxStyle,
+  buildQml,
   buildSld,
   isPlaceholderLayer,
   mapboxStyleToJson,
   parseMapboxStyle,
+  parseQml,
   parseSld,
   placeholderMessage,
 } from "@geolibre/map";
@@ -908,120 +911,52 @@ export function LayerPanel({
     [clearRefreshStatusTimer, mapControllerRef, scheduleStatusClear],
   );
 
-  // Export a vector layer's symbology as a self-contained Mapbox GL / MapLibre
-  // style document, so the cartography can be reused in another map or handed to
-  // a teammate instead of being locked inside the .geolibre.json project.
-  const handleExportStyle = useCallback(
-    async (layer: GeoLibreLayer) => {
+  // Shared symbology-export flow: resolve the layer's features, build the style
+  // text via `build`, save it, and set the success/warning/error status. Each
+  // format (Mapbox GL / SLD / QML) supplies only its builder and file metadata,
+  // so the three export handlers stay in sync as more formats are added. A
+  // builder returns `{ error }` to abort with a message (e.g. the Mapbox
+  // exporter needs embedded features), or `{ text, warnings }` to save.
+  const exportLayerStyle = useCallback(
+    async (
+      layer: GeoLibreLayer,
+      build: (
+        geojson: FeatureCollection | null,
+      ) => { text: string; warnings: string[] } | { error: string },
+      fileMeta: {
+        defaultName: string;
+        filters: { name: string; extensions: string[] }[];
+        browserTypes: { description: string; accept: Record<string, string[]> }[];
+        mimeType: string;
+      },
+    ) => {
       clearRefreshStatusTimer(layer.id);
       try {
         const geojson = await resolveLayerGeojson(
           layer,
           mapControllerRef.current?.getMap() ?? undefined,
         );
-        if (!geojson) {
-          // Mirror handleExportLayer: a source-backed (Add Vector Layer) layer
-          // whose features are not readable yet is usually a not-yet-ready map
-          // source, so surface that rather than exporting a style with no data.
-          const message =
-            geojsonVectorSourceId(layer) !== null
-              ? t("layers.exportStyleDataNotReady")
-              : t("layers.exportStyleNeedsFeatures");
+        const built = build(geojson ?? null);
+        if ("error" in built) {
           setRefreshStatuses((current) => ({
             ...current,
-            [layer.id]: { type: "error", message },
+            [layer.id]: { type: "error", message: built.error },
           }));
           scheduleStatusClear(layer.id);
           return;
         }
-        const result = buildMapboxStyle(layer, geojson);
-        const savedPath = await saveTextFileWithFallback(
-          mapboxStyleToJson(result),
-          {
-            defaultName: `${sanitizeExportFileName(layer.name)}.style.json`,
-            filters: [
-              { name: "Mapbox GL style", extensions: ["json"] },
-            ],
-            browserTypes: [
-              {
-                description: "Mapbox GL style",
-                accept: { "application/json": [".json"] },
-              },
-            ],
-            mimeType: "application/json",
-          },
-        );
+        const savedPath = await saveTextFileWithFallback(built.text, fileMeta);
         // A null path means the user cancelled the save dialog, so no note.
         if (savedPath !== null) {
           setRefreshStatuses((current) => ({
             ...current,
             [layer.id]:
-              result.warnings.length > 0
+              built.warnings.length > 0
                 ? {
                     type: "warning",
-                    message: `${t("layers.exportStyleSuccess")} ${result.warnings.join(" ")}`,
+                    message: `${t("layers.exportStyleSuccess")} ${built.warnings.join(" ")}`,
                   }
-                : {
-                    type: "success",
-                    message: t("layers.exportStyleSuccess"),
-                  },
-          }));
-          scheduleStatusClear(layer.id);
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : t("layers.exportStyleError");
-        setRefreshStatuses((current) => ({
-          ...current,
-          [layer.id]: { type: "error", message },
-        }));
-        scheduleStatusClear(layer.id);
-      }
-    },
-    [clearRefreshStatusTimer, mapControllerRef, scheduleStatusClear, t],
-  );
-
-  // Export a vector layer's symbology as an OGC SLD document, the interchange
-  // format QGIS, GeoServer, MapServer, and ArcGIS speak, so GeoLibre cartography
-  // can be handed off to a desktop-GIS or WMS workflow.
-  const handleExportSldStyle = useCallback(
-    async (layer: GeoLibreLayer) => {
-      clearRefreshStatusTimer(layer.id);
-      try {
-        const geojson = await resolveLayerGeojson(
-          layer,
-          mapControllerRef.current?.getMap() ?? undefined,
-        );
-        // Unlike the Mapbox export, SLD carries no data, so a layer whose
-        // features are not readable can still export (geometry detection just
-        // falls back to a symbolizer superset); pass whatever we resolved.
-        const result = buildSld(layer, geojson ?? null);
-        const savedPath = await saveTextFileWithFallback(result.sld, {
-          defaultName: `${sanitizeExportFileName(layer.name)}.sld`,
-          filters: [{ name: "OGC SLD", extensions: ["sld", "xml"] }],
-          browserTypes: [
-            {
-              description: "OGC SLD",
-              accept: { "application/xml": [".sld", ".xml"] },
-            },
-          ],
-          mimeType: "application/xml",
-        });
-        if (savedPath !== null) {
-          setRefreshStatuses((current) => ({
-            ...current,
-            [layer.id]:
-              result.warnings.length > 0
-                ? {
-                    type: "warning",
-                    message: `${t("layers.exportStyleSuccess")} ${result.warnings.join(" ")}`,
-                  }
-                : {
-                    type: "success",
-                    message: t("layers.exportStyleSuccess"),
-                  },
+                : { type: "success", message: t("layers.exportStyleSuccess") },
           }));
           scheduleStatusClear(layer.id);
         }
@@ -1038,6 +973,93 @@ export function LayerPanel({
     [clearRefreshStatusTimer, mapControllerRef, scheduleStatusClear, t],
   );
 
+  // Export a vector layer's symbology as a self-contained Mapbox GL / MapLibre
+  // style document, so the cartography can be reused in another map or handed to
+  // a teammate instead of being locked inside the .geolibre.json project.
+  const handleExportStyle = useCallback(
+    (layer: GeoLibreLayer) =>
+      exportLayerStyle(
+        layer,
+        (geojson) => {
+          if (!geojson) {
+            // A source-backed (Add Vector Layer) layer whose features are not
+            // readable yet is usually a not-yet-ready map source; the Mapbox
+            // export embeds the data, so it cannot proceed without it.
+            return {
+              error:
+                geojsonVectorSourceId(layer) !== null
+                  ? t("layers.exportStyleDataNotReady")
+                  : t("layers.exportStyleNeedsFeatures"),
+            };
+          }
+          const result = buildMapboxStyle(layer, geojson);
+          return { text: mapboxStyleToJson(result), warnings: result.warnings };
+        },
+        {
+          defaultName: `${sanitizeExportFileName(layer.name)}.style.json`,
+          filters: [{ name: "Mapbox GL style", extensions: ["json"] }],
+          browserTypes: [
+            {
+              description: "Mapbox GL style",
+              accept: { "application/json": [".json"] },
+            },
+          ],
+          mimeType: "application/json",
+        },
+      ),
+    [exportLayerStyle, t],
+  );
+
+  // Export a vector layer's symbology as an OGC SLD document, the interchange
+  // format QGIS, GeoServer, MapServer, and ArcGIS speak. Unlike the Mapbox
+  // export, SLD carries no data, so a layer whose features are not readable can
+  // still export (geometry detection falls back to a symbolizer superset).
+  const handleExportSldStyle = useCallback(
+    (layer: GeoLibreLayer) =>
+      exportLayerStyle(
+        layer,
+        (geojson) => {
+          const result = buildSld(layer, geojson);
+          return { text: result.sld, warnings: result.warnings };
+        },
+        {
+          defaultName: `${sanitizeExportFileName(layer.name)}.sld`,
+          filters: [{ name: "OGC SLD", extensions: ["sld", "xml"] }],
+          browserTypes: [
+            {
+              description: "OGC SLD",
+              accept: { "application/xml": [".sld", ".xml"] },
+            },
+          ],
+          mimeType: "application/xml",
+        },
+      ),
+    [exportLayerStyle],
+  );
+
+  // Export a vector layer's symbology as a QGIS QML style, the native style
+  // format QGIS users have on disk, so GeoLibre cartography can be opened in
+  // QGIS without rebuilding it by hand.
+  const handleExportQmlStyle = useCallback(
+    (layer: GeoLibreLayer) =>
+      exportLayerStyle(
+        layer,
+        (geojson) => {
+          const result = buildQml(layer, geojson);
+          return { text: result.qml, warnings: result.warnings };
+        },
+        {
+          defaultName: `${sanitizeExportFileName(layer.name)}.qml`,
+          filters: [{ name: "QGIS QML", extensions: ["qml"] }],
+          browserTypes: [
+            { description: "QGIS QML", accept: { "application/xml": [".qml"] } },
+          ],
+          mimeType: "application/xml",
+        },
+      ),
+    [exportLayerStyle],
+  );
+
   // Import a symbology file (Mapbox GL / MapLibre style JSON or an OGC SLD) and
   // apply it to a vector layer, so cartography authored elsewhere (QGIS,
   // GeoServer, another map, or a style exported from GeoLibre) can be brought
@@ -1050,9 +1072,13 @@ export function LayerPanel({
       try {
         const picked = await openLocalDataFileWithFallback({
           filters: [
-            { name: "Style (Mapbox GL / SLD)", extensions: ["json", "sld", "xml"] },
+            {
+              name: "Style (Mapbox GL / SLD / QML)",
+              extensions: ["json", "sld", "qml", "xml"],
+            },
           ],
-          accept: ".json,.sld,.xml,application/json,application/xml,text/xml",
+          accept:
+            ".json,.sld,.qml,.xml,application/json,application/xml,text/xml",
           readText: true,
         });
         // A null result means the user dismissed the file dialog; no note. Guard
@@ -1061,19 +1087,28 @@ export function LayerPanel({
         // no-op that looks like a cancel.
         if (!picked || picked.text === undefined) return;
 
-        // Detect the format from the content: a leading `<` is XML (SLD),
-        // everything else is parsed as a Mapbox GL style JSON. This is more
-        // reliable than the file extension (a `.xml` can hold either).
+        // Detect the format from the content, which is more reliable than the
+        // file extension (a `.xml` can hold either XML dialect): a QGIS QML has
+        // a `<qgis>`/`renderer-v2` root, an SLD a `StyledLayerDescriptor` root,
+        // and everything else is parsed as a Mapbox GL style JSON.
         const trimmed = picked.text.trimStart();
-        const isSld = trimmed.startsWith("<");
+        const isXml = trimmed.startsWith("<");
+        const isQml = isXml && /<qgis[\s>]|<renderer-v2[\s>]/.test(picked.text);
+        const isSld = isXml && !isQml;
 
         let result:
           | ReturnType<typeof parseMapboxStyle>
-          | ReturnType<typeof parseSld>;
+          | ReturnType<typeof parseSld>
+          | ReturnType<typeof parseQml>;
         let matched: number;
         let applyImport: (base: GeoLibreLayer["style"]) => GeoLibreLayer["style"];
 
-        if (isSld) {
+        if (isQml) {
+          const qmlResult = parseQml(picked.text);
+          result = qmlResult;
+          matched = qmlResult.matchedRuleCount;
+          applyImport = (base) => applyQmlImport(base, qmlResult);
+        } else if (isSld) {
           const sldResult = parseSld(picked.text);
           result = sldResult;
           matched = sldResult.matchedRuleCount;
@@ -2452,6 +2487,14 @@ export function LayerPanel({
                                 >
                                   <Download className="mr-2 h-3.5 w-3.5" />
                                   {t("layers.exportSldStyle")}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    void handleExportQmlStyle(layer);
+                                  }}
+                                >
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  {t("layers.exportQmlStyle")}
                                 </DropdownMenuItem>
                               </>
                             )}

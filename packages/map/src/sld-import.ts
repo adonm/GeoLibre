@@ -96,7 +96,7 @@ function isNode(value: unknown): value is XmlNode {
  * exporter's `xmlEscape` (e.g. `A &amp; B`) round-trips back to `A & B`.
  */
 function decodeXmlEntities(value: string): string {
-  return value.replace(/&(#x?[0-9a-fA-F]+|amp|lt|gt|quot|apos);/g, (match, body) => {
+  return value.replace(/&(#(?:[0-9]+|[xX][0-9a-fA-F]+)|amp|lt|gt|quot|apos);/g, (match, body) => {
     switch (body) {
       case "amp":
         return "&";
@@ -113,7 +113,11 @@ function decodeXmlEntities(value: string): string {
           body[1] === "x" || body[1] === "X"
             ? Number.parseInt(body.slice(2), 16)
             : Number.parseInt(body.slice(1), 10);
-        return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+        // fromCodePoint throws on out-of-range values, so validate the code
+        // point (untrusted input) and keep the raw text otherwise.
+        return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+          ? String.fromCodePoint(code)
+          : match;
       }
     }
   });
