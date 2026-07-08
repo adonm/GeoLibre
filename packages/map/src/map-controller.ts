@@ -41,6 +41,10 @@ import {
 } from "./layer-sync";
 import { installGlobePopupOcclusion } from "./globe-popup-occlusion";
 import { ResetBearingControl } from "./reset-bearing-control";
+import {
+  TerrainControl,
+  DEFAULT_TERRAIN_EXAGGERATION,
+} from "./terrain-control";
 
 const DEFAULT_PROJECTION: maplibregl.ProjectionSpecification = {
   type: "globe",
@@ -85,10 +89,47 @@ const TERRAIN_SOURCE: maplibregl.RasterDEMSourceSpecification = {
   attribution:
     'Elevation tiles by <a href="https://registry.opendata.aws/terrain-tiles/">AWS Open Data Terrain Tiles</a>',
 };
-const TERRAIN_OPTIONS: maplibregl.TerrainSpecification = {
-  source: TERRAIN_SOURCE_ID,
-  exaggeration: 1,
-};
+/**
+ * Window event dispatched when the terrain control is double-clicked, so the
+ * React layer can open the vertical-exaggeration dialog. The controller lives
+ * outside React, so it signals through a window event rather than a callback.
+ *
+ * These terrain events are dispatched on `window` (not scoped to a controller
+ * instance), so they assume a single terrain-enabled map: only the primary pane
+ * enables the terrain control today (secondary panes never override the default
+ * `terrain: false`), and one dialog — bound to the primary controller — listens.
+ * A future secondary-pane terrain control would need the event scoped to its
+ * originating controller.
+ */
+export const TERRAIN_SETTINGS_EVENT = "geolibre:terrain-settings-open";
+/** DOM class the LayerControl gives its container element. */
+const LAYER_CONTROL_SELECTOR = ".maplibregl-ctrl-layer-control";
+
+/**
+ * Restore `refreshed` to just before `anchor` under `parent` after a
+ * remove/re-add appended it to the end of its control corner. No-ops safely
+ * when the reinsert can't be trusted: no parent, the anchor drifted to a
+ * different parent, or `refreshed` is missing / already the anchor.
+ *
+ * Exported for unit testing; the reorder itself is only observable against a
+ * real MapLibre control DOM (see refreshLayerControl).
+ */
+export function restoreControlOrder(
+  parent: Element | null,
+  anchor: Element | null,
+  refreshed: Element | null,
+): void {
+  if (!parent) return;
+  if (anchor !== null && anchor.parentElement !== parent) return;
+  if (!refreshed || refreshed === anchor) return;
+  parent.insertBefore(refreshed, anchor);
+}
+/**
+ * Window event dispatched when the terrain control is removed (e.g. hidden from
+ * the Controls menu), so the React layer closes the exaggeration dialog rather
+ * than leaving it open with no terrain to affect.
+ */
+export const TERRAIN_SETTINGS_CLOSE_EVENT = "geolibre:terrain-settings-close";
 const EMPTY_HIGHLIGHT: FeatureCollection = {
   type: "FeatureCollection",
   features: [],
@@ -254,7 +295,11 @@ export class MapController {
   private backgroundLabel = "Background";
   private geolocateControl: maplibregl.GeolocateControl | null = null;
   private globeControl: maplibregl.GlobeControl | null = null;
-  private terrainControl: maplibregl.TerrainControl | null = null;
+  private terrainControl: TerrainControl | null = null;
+  private terrainExaggeration = DEFAULT_TERRAIN_EXAGGERATION;
+  // Undefined until the React layer supplies a translated label; the control
+  // falls back to its own default in the meantime (single source for the string).
+  private terrainLabel: string | undefined;
   private scaleControl: maplibregl.ScaleControl | null = null;
   private attributionControl: maplibregl.AttributionControl | null = null;
   private logoControl: maplibregl.LogoControl | null = null;
@@ -654,8 +699,13 @@ export class MapController {
     else if (control === "compass") this.removeCompassControl();
     else if (control === "geolocate") this.removeGeolocateControl();
     else if (control === "globe") this.removeGlobeControl();
-    else if (control === "terrain") this.removeTerrainControl();
-    else if (control === "scale") this.removeScaleControl();
+    else if (control === "terrain") {
+      this.removeTerrainControl();
+      // Terrain is genuinely being hidden here (not repositioned, which goes
+      // through removeBuiltInControl), so close the exaggeration dialog — it has
+      // no control to act on now.
+      window.dispatchEvent(new CustomEvent(TERRAIN_SETTINGS_CLOSE_EVENT));
+    } else if (control === "scale") this.removeScaleControl();
     else if (control === "attribution") this.removeAttributionControl();
     else if (control === "logo") this.removeLogoControl();
     else this.removeLayerControl();
@@ -1460,8 +1510,25 @@ export class MapController {
     const nextSignature = this.createLayerControlSignature(layerControlConfig);
     if (nextSignature === this.layerControlSignature) return;
 
+    // Capture the control's spot in its corner before the remove/re-add. The
+    // LayerControl's layer list is fixed at construction, so a refresh must
+    // rebuild it — but MapLibre's addControl re-appends to the end of the
+    // corner, which would drop the control below any controls inserted after it
+    // (e.g. a terrain control the user enabled post-load), visibly reordering
+    // the stack on every basemap/style change. Re-anchor it to its old sibling.
+    const container = this.map.getContainer();
+    const previous = container.querySelector(LAYER_CONTROL_SELECTOR);
+    const anchor = previous?.nextElementSibling ?? null;
+    const parent = previous?.parentElement ?? null;
+
     this.removeLayerControl();
     this.addLayerControl();
+
+    restoreControlOrder(
+      parent,
+      anchor,
+      container.querySelector(LAYER_CONTROL_SELECTOR),
+    );
   }
 
   private syncLayerControlState(): void {
@@ -2130,7 +2197,16 @@ export class MapController {
       return false;
     }
     this.addTerrainSource();
-    this.terrainControl = new maplibregl.TerrainControl(TERRAIN_OPTIONS);
+    this.terrainControl = new TerrainControl({
+      source: TERRAIN_SOURCE_ID,
+      exaggeration: this.terrainExaggeration,
+      label: this.terrainLabel,
+      // Double-clicking the button asks the React layer to open the
+      // vertical-exaggeration dialog (see TERRAIN_SETTINGS_EVENT).
+      onOpenSettings: () => {
+        window.dispatchEvent(new CustomEvent(TERRAIN_SETTINGS_EVENT));
+      },
+    });
     this.map.addControl(this.terrainControl, this.controlPositions.terrain);
     return true;
   }
@@ -2142,6 +2218,37 @@ export class MapController {
     if (!this.terrainControl) return;
     this.removeControl(this.terrainControl);
     this.terrainControl = null;
+  }
+
+  /** The current terrain vertical exaggeration. */
+  getTerrainExaggeration(): number {
+    return this.terrainExaggeration;
+  }
+
+  /**
+   * Set the terrain vertical exaggeration. Cached so it survives the control
+   * being re-added (Controls menu toggle, style reload) and applied live when
+   * terrain is already enabled.
+   */
+  setTerrainExaggeration(exaggeration: number): void {
+    // Clamp before caching so the cached value (which seeds the next control
+    // built on a Controls-menu toggle / style reload) can't drift from what the
+    // live control actually applies, and so the public API is safe regardless of
+    // whether the caller pre-validated. Mirrors TerrainControl.setExaggeration.
+    const safe = Number.isFinite(exaggeration)
+      ? Math.max(0, exaggeration)
+      : this.terrainExaggeration;
+    this.terrainExaggeration = safe;
+    this.terrainControl?.setExaggeration(safe);
+  }
+
+  /**
+   * Update the terrain control's tooltip/aria label, e.g. after a UI language
+   * change. Cached so a re-added control picks up the latest translation.
+   */
+  setTerrainLabel(label: string): void {
+    this.terrainLabel = label;
+    this.terrainControl?.setLabel(label);
   }
 
   private addScaleControl(): boolean {
