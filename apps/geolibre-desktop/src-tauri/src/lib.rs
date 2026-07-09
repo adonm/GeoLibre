@@ -205,6 +205,7 @@ pub fn run() {
             native_duckdb::load_native_vector_file,
             load_external_plugin_bundles,
             read_admin_profile,
+            read_env_vars,
             read_local_file,
             read_project_file,
             read_shapefile_siblings,
@@ -424,6 +425,55 @@ fn read_admin_profile(app: tauri::AppHandle) -> Result<Option<String>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("Could not read admin profile: {error}")),
     }
+}
+
+/// The only environment variable names `read_env_vars` will ever return. This
+/// is a hard, server-side boundary: external plugins and any other JavaScript
+/// run in the same (unsandboxed) webview can `invoke("read_env_vars", …)` with
+/// arbitrary names, so the allowlist cannot live in the frontend alone or a
+/// malicious caller could exfiltrate unrelated shell secrets (SSH_AUTH_SOCK,
+/// GITHUB_TOKEN, ambient cloud credentials, …). Kept in sync with
+/// `OS_ENV_VAR_NAMES` in `apps/geolibre-desktop/src/lib/assistant/provider.ts`
+/// — the `assistant-os-env` test parses this list and asserts the two match.
+const ALLOWED_ENV_VARS: &[&str] = &[
+    "GEOLIBRE_ASSISTANT_PROVIDER",
+    "GEOLIBRE_ASSISTANT_MODEL",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_MODEL",
+    "OPENAI_COMPATIBLE_BASE_URL",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "OPENAI_COMPATIBLE_MODEL",
+    "TAVILY_API_KEY",
+];
+
+/// Read the AI Assistant's allowlisted variables from the OS environment.
+///
+/// Only names in `ALLOWED_ENV_VARS` that the caller requests are returned,
+/// and only when present and non-empty, so the desktop app never leaks the full
+/// process environment — nor any variable outside the allowlist — into the
+/// webview. This lets the assistant source provider API keys from the user's
+/// system/shell environment instead of the project file (issue #1141), keeping
+/// secrets out of the saved `.geolibre.json`.
+#[tauri::command]
+fn read_env_vars(names: Vec<String>) -> std::collections::HashMap<String, String> {
+    names
+        .into_iter()
+        .filter(|name| ALLOWED_ENV_VARS.contains(&name.as_str()))
+        .filter_map(|name| {
+            let value = env::var(&name).ok()?;
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some((name, trimmed.to_string()))
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]

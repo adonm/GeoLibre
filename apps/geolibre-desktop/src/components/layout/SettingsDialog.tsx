@@ -58,6 +58,7 @@ import {
   Settings,
   SlidersHorizontal,
   Sun,
+  Terminal,
   Type,
   Trash2,
   TriangleAlert,
@@ -104,8 +105,11 @@ import {
   ASSISTANT_PROVIDER_IDS,
   PROVIDER_LABELS,
   availableProviders,
+  scopeOsEnvToProject,
   type AssistantProviderId,
+  type RuntimeEnv,
 } from "../../lib/assistant/provider";
+import { loadOsEnvVars, readOsEnv } from "../../lib/assistant/os-env";
 import {
   PROVIDER_DOCS_URL,
   PROVIDER_FIELDS,
@@ -462,9 +466,39 @@ export function SettingsDialog({
     }
     return env;
   }, [draftPreferences.environmentVariables]);
+  // AI keys read from the user's OS environment (desktop only). This dialog is
+  // mounted eagerly at startup — before the App-root loader populates the cache
+  // and before the async Tauri read resolves — so a mount-only read would freeze
+  // at `{}`. Load it here through state (mirroring useRuntimeEnvironmentVariables)
+  // so provider status and the badges below reflect env-sourced credentials.
+  const [osEnv, setOsEnv] = useState<RuntimeEnv>(() => readOsEnv());
+  useEffect(() => {
+    let cancelled = false;
+    loadOsEnvVars().then((env) => {
+      if (!cancelled) setOsEnv(env);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // Scope OS values against the draft exactly as the runtime merge does
+  // (useRuntimeEnvironmentVariables), so this dialog's notion of "configured"
+  // and the field badges match what the assistant will actually resolve — a
+  // plain spread would disagree in the alias-collision case (e.g. an empty
+  // project GOOGLE_API_KEY row shadows the whole Google OS alias group).
+  const scopedOsEnv = useMemo(
+    () => scopeOsEnvToProject(osEnv, new Set(Object.keys(draftEnv))),
+    [osEnv, draftEnv],
+  );
+  // Merge OS env under the draft so a provider configured purely via a system
+  // environment variable still reports "ready" — draft values win the overlap.
+  const effectiveEnv = useMemo(
+    () => ({ ...scopedOsEnv, ...draftEnv }),
+    [scopedOsEnv, draftEnv],
+  );
   const configuredProviders = useMemo(
-    () => new Set(availableProviders(draftEnv)),
-    [draftEnv],
+    () => new Set(availableProviders(effectiveEnv)),
+    [effectiveEnv],
   );
 
   // Seed the draft from the store only when the dialog opens. Depending on
@@ -496,11 +530,15 @@ export function SettingsDialog({
     );
     // Land the AI section on a provider the user already configured, so editing
     // existing credentials needs no extra click.
-    const seededEnv: Record<string, string> = {};
+    const seededProjectEnv: Record<string, string> = {};
     for (const variable of seededPreferences.environmentVariables) {
       const key = variable.key.trim();
-      if (variable.enabled && key) seededEnv[key] = variable.value;
+      if (variable.enabled && key) seededProjectEnv[key] = variable.value;
     }
+    const seededEnv = {
+      ...scopeOsEnvToProject(readOsEnv(), new Set(Object.keys(seededProjectEnv))),
+      ...seededProjectEnv,
+    };
     setAiProvider(availableProviders(seededEnv)[0] ?? "google");
     setRevealedValueIds(new Set());
     setError(null);
@@ -634,6 +672,16 @@ export function SettingsDialog({
       if (row) return row.value;
     }
     return "";
+  };
+
+  // The OS-environment variable name backing a field, when the system provides
+  // a value the project doesn't. Drives the "read from your environment" badge
+  // so a user sees a key is already covered without typing (or saving) it here.
+  const osFieldEnvName = (field: ProviderField): string | null => {
+    for (const key of fieldEnvKeys(field)) {
+      if (scopedOsEnv[key]?.trim()) return key;
+    }
+    return null;
   };
 
   // Write an AI provider field through to its backing env var. Edits the enabled
@@ -2241,9 +2289,20 @@ export function SettingsDialog({
                     <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>{t("settings.env.secretsWarning")}</span>
                   </div>
+                  {PROVIDER_FIELDS[aiProvider].some(
+                    (field) => osFieldEnvName(field) !== null,
+                  ) ? (
+                    <div className="flex items-start gap-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-3 text-xs text-sky-700 dark:text-sky-300">
+                      <Terminal className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{t("settings.ai.osEnvNote")}</span>
+                    </div>
+                  ) : null}
                   <div className="space-y-4">
                     {PROVIDER_FIELDS[aiProvider].map((field) => {
                       const revealed = revealedValueIds.has(field.envKey);
+                      const osEnvName = osFieldEnvName(field);
+                      const fromOsEnv =
+                        getProviderField(field) === "" && osEnvName !== null;
                       return (
                         <div key={field.envKey} className="space-y-1.5">
                           <div className="flex items-center justify-between gap-2">
@@ -2274,7 +2333,11 @@ export function SettingsDialog({
                               onChange={(event) =>
                                 setProviderField(field, event.target.value)
                               }
-                              placeholder={t(field.placeholderKey)}
+                              placeholder={
+                                fromOsEnv
+                                  ? t("settings.ai.osEnvPlaceholder")
+                                  : t(field.placeholderKey)
+                              }
                             />
                             {field.secret ? (
                               <Button
@@ -2302,6 +2365,16 @@ export function SettingsDialog({
                               </Button>
                             ) : null}
                           </div>
+                          {fromOsEnv ? (
+                            <p className="flex items-center gap-1.5 text-[11px] text-sky-700 dark:text-sky-300">
+                              <Terminal className="h-3 w-3 shrink-0" />
+                              <span>
+                                {t("settings.ai.osEnvField", {
+                                  name: osEnvName,
+                                })}
+                              </span>
+                            </p>
+                          ) : null}
                         </div>
                       );
                     })}
