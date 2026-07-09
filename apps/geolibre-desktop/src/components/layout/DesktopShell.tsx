@@ -50,10 +50,12 @@ import {
   loadDroppedRasterFiles,
   loadDroppedRasterPaths,
   isLoadedImageOverlay,
+  isLoadedModel,
   loadDroppedVectorFiles,
   loadDroppedVectorPaths,
   type DroppedRaster,
 } from "../../lib/tauri-io";
+import { buildKmlModelLayer } from "../../lib/kml-model-layer";
 import {
   isPhotoDropFileName,
   type GeotaggedPhotoResult,
@@ -475,6 +477,7 @@ export function DesktopShell({
   const togglingGeometryEditRef = useRef(false);
   const addGeoJsonLayer = useAppStore((s) => s.addGeoJsonLayer);
   const addImageOverlayLayer = useAppStore((s) => s.addImageOverlayLayer);
+  const addLayer = useAppStore((s) => s.addLayer);
   const projectGeneration = useAppStore((s) => s.projectGeneration);
   const pythonConsoleOpen = useAppStore((s) => s.ui.pythonConsoleOpen);
   const setPythonConsoleOpen = useAppStore((s) => s.setPythonConsoleOpen);
@@ -1001,6 +1004,13 @@ export function DesktopShell({
           );
           continue;
         }
+        // A KML/KMZ <Model> becomes a deck.gl scenegraph layer.
+        if (isLoadedModel(layer)) {
+          const modelLayer = buildKmlModelLayer(layer);
+          addLayer(modelLayer);
+          lastLayerId = modelLayer.id;
+          continue;
+        }
         // `||` (not `??`) so an empty-string name falls back to the path, and
         // matches the name shown in the drop confirmation toast.
         lastLayerId = addGeoJsonLayer(
@@ -1013,9 +1023,29 @@ export function DesktopShell({
       const importedLayer = useAppStore
         .getState()
         .layers.find((layer) => layer.id === lastLayerId);
-      if (importedLayer) mapControllerRef.current?.fitLayer(importedLayer);
+      if (importedLayer) {
+        // A deck.gl-backed layer (e.g. a KML <Model> scenegraph) mounts its
+        // overlay on the next render; fitting synchronously here races that
+        // mount and the camera move is lost. Defer the fit past the mount so
+        // it frames the model. MapLibre-native layers fit synchronously.
+        if (importedLayer.type === "deckgl-viz") {
+          const layerId = importedLayer.id;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              window.setTimeout(() => {
+                const current = useAppStore
+                  .getState()
+                  .layers.find((layer) => layer.id === layerId);
+                if (current) mapControllerRef.current?.fitLayer(current);
+              }, 50);
+            });
+          });
+        } else {
+          mapControllerRef.current?.fitLayer(importedLayer);
+        }
+      }
     },
-    [addGeoJsonLayer, addImageOverlayLayer],
+    [addGeoJsonLayer, addImageOverlayLayer, addLayer],
   );
 
   const addDroppedPhotos = useCallback(
