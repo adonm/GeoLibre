@@ -3,6 +3,7 @@ import {
   DEFAULT_BASEMAP,
   DEFAULT_PROJECT_PREFERENCES,
   getPlanetaryBasemapByStyleUrl,
+  PLANETARY_BASEMAP_SENTINEL_PREFIX,
   useAppStore,
 } from "@geolibre/core";
 import type {
@@ -220,14 +221,25 @@ function resolveMapStyle(
   if (styleUrl === BLANK_BASEMAP) return createBlankMapStyle();
   const planetary = getPlanetaryBasemapByStyleUrl(styleUrl);
   if (planetary) return createPlanetaryMapStyle(planetary);
+  // A planetary sentinel that no longer resolves (e.g. a project saved with a
+  // basemap id that has since been renamed) must not be handed to MapLibre as a
+  // style URL — it would try to fetch the `geolibre://` sentinel and blank the
+  // map. Fall back to the default basemap instead.
+  if (styleUrl?.startsWith(PLANETARY_BASEMAP_SENTINEL_PREFIX)) {
+    console.warn(
+      `Unknown planetary basemap "${styleUrl}"; falling back to the default basemap.`,
+    );
+    return DEFAULT_BASEMAP;
+  }
   return styleUrl ?? DEFAULT_BASEMAP;
 }
 
 /**
- * A single-source raster style for a non-Earth body. The tiles are XYZ PNGs in
- * that body's Web-Mercator scheme, so MapLibre renders them like any raster
- * basemap. A dark background shows through at zoom levels the source doesn't
- * cover, matching how the planetary tiles fade to black at the poles.
+ * A single-source raster style for a non-Earth body. The tiles are PNGs in that
+ * body's Web-Mercator scheme (XYZ, or TMS when `basemap.scheme` says so), so
+ * MapLibre renders them like any raster basemap. A dark background shows
+ * through at zoom levels the source doesn't cover, matching how the planetary
+ * tiles fade to black at the poles.
  */
 function createPlanetaryMapStyle(
   basemap: PlanetaryBasemap,
@@ -240,6 +252,9 @@ function createPlanetaryMapStyle(
         tiles: [basemap.tileUrl],
         tileSize: 256,
         maxzoom: basemap.maxZoom,
+        // OpenPlanetaryMap's S3 mosaics are TMS (flipped Y); the CARTO named
+        // maps are XYZ. MapLibre defaults to "xyz" when scheme is omitted.
+        ...(basemap.scheme ? { scheme: basemap.scheme } : {}),
         attribution: basemap.attribution,
       },
     },
