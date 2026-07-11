@@ -8,6 +8,7 @@ import {
   PRECIPITATION_PLUGIN_ID,
   REVERSE_GEOCODE_PLUGIN_ID,
   EFFECTS_PLUGIN_ID,
+  ROUTE_ANIMATION_PLUGIN_ID,
   SUN_PLUGIN_ID,
   WEB_SERVICE_PLUGIN_IDS,
 } from "@geolibre/plugins";
@@ -67,10 +68,14 @@ export function PluginsMenu({
 
   const renderPluginMenuItem = (p: RegisteredPlugin) => {
     const pluginPosition = getMapControlPosition(p.id);
+    // Translate the plugin's display name when a locale string exists for its id,
+    // falling back to the registered (English) name — brand/proper-noun plugins
+    // (Mapillary, NASA Earthdata, …) simply have no key and stay as-is.
+    const pluginName = t(`toolbar.plugin.${p.id}`, { defaultValue: p.name });
     if (!pluginPosition) {
       return (
         <DropdownMenuItem key={p.id} onClick={() => toggle(p.id, appApi)}>
-          {p.name}
+          {pluginName}
           {isActive(p.id) ? " ✓" : ""}
         </DropdownMenuItem>
       );
@@ -79,7 +84,7 @@ export function PluginsMenu({
     return (
       <DropdownMenuSub key={p.id}>
         <DropdownMenuSubTrigger>
-          {p.name}
+          {pluginName}
           {isActive(p.id) ? " ✓" : ""}
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
@@ -151,6 +156,7 @@ export function PluginsMenu({
           if (
             p.id === EFFECTS_PLUGIN_ID ||
             p.id === SUN_PLUGIN_ID ||
+            p.id === ROUTE_ANIMATION_PLUGIN_ID ||
             p.id === DIRECTIONS_PLUGIN_ID ||
             p.id === REVERSE_GEOCODE_PLUGIN_ID ||
             p.id === GRATICULE_PLUGIN_ID ||
