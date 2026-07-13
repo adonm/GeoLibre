@@ -3,7 +3,14 @@ import type { MapController } from "@geolibre/map";
 import { fetchPostgisStatus, listPostgisTables } from "@geolibre/processing";
 import { Input, ScrollArea } from "@geolibre/ui";
 import { Search } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { startGeoLibreSidecar } from "../../lib/sidecar";
 import {
@@ -23,6 +30,7 @@ import {
   augmentConnections,
   augmentFolders,
   filterBrowserTree,
+  flattenVisibleTree,
   type BrowserNode,
   type ConnectionLoad,
   type FolderLoad,
@@ -294,6 +302,103 @@ export function BrowserPanel({
     });
   };
 
+  // Keyboard navigation (WAI-ARIA tree pattern). The visible rows, flattened
+  // top-to-bottom, are what Arrow Up/Down step through; Right/Left expand/
+  // collapse or move to child/parent. Roving tabindex: only `activeRowId` is
+  // tab-reachable, so the whole tree is one Tab stop and arrows move within it.
+  const treeRef = useRef<HTMLUListElement>(null);
+  const visibleRows = useMemo(
+    // "info" rows (loading/error status) are non-interactive text, not tree
+    // items, so they're excluded from keyboard navigation.
+    () =>
+      flattenVisibleTree(filtered, effectiveExpanded).filter(
+        (row) => row.kind !== "info",
+      ),
+    [filtered, effectiveExpanded],
+  );
+  const [activeRowId, setActiveRowId] = useState<string | null>(null);
+  // Fall back to the first row when nothing is active yet, or the active row
+  // scrolled out of existence (filtered away / its parent collapsed).
+  const currentRowId =
+    activeRowId && visibleRows.some((row) => row.id === activeRowId)
+      ? activeRowId
+      : (visibleRows[0]?.id ?? null);
+
+  const focusRow = (id: string) => {
+    setActiveRowId(id);
+    // The button already exists (only its tabIndex flips), so focus it now
+    // rather than waiting for the roving-tabindex re-render. Escape only `"`/`\`
+    // for the quoted attribute value — CSS.escape is for identifiers and would
+    // wrongly escape the `:`/`/` that ids like `section:services` contain.
+    const escaped = id.replace(/["\\]/g, "\\$&");
+    const selector = `[data-browser-row="${escaped}"]`;
+    treeRef.current?.querySelector<HTMLElement>(selector)?.focus();
+  };
+
+  const onTreeKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
+    // Only navigate when a treeitem row is focused. A row's secondary buttons
+    // (star/×/＋) are Tab-reachable; an Arrow key fired from one of those must
+    // not hijack nav and yank focus to another row.
+    if (
+      !(event.target instanceof HTMLElement) ||
+      !event.target.hasAttribute("data-browser-row")
+    ) {
+      return;
+    }
+    if (!currentRowId) return;
+    const index = visibleRows.findIndex((row) => row.id === currentRowId);
+    if (index === -1) return;
+    const row = visibleRows[index];
+    let targetId: string | null | undefined;
+    switch (event.key) {
+      case "ArrowDown":
+        targetId = visibleRows[index + 1]?.id;
+        break;
+      case "ArrowUp":
+        targetId = visibleRows[index - 1]?.id;
+        break;
+      case "Home":
+        targetId = visibleRows[0]?.id;
+        break;
+      case "End":
+        targetId = visibleRows[visibleRows.length - 1]?.id;
+        break;
+      case "ArrowRight":
+        if (row.isGroup && !row.isExpanded) {
+          event.preventDefault();
+          toggle(row.id); // expand in place
+          return;
+        }
+        // Move to the group's first navigable child. Found by parentId rather
+        // than positional adjacency, since the group's only children may be
+        // non-navigable info rows (a connection/folder still loading or errored)
+        // or it may be an empty group — in which case Right Arrow is a no-op.
+        if (row.isGroup && row.isExpanded) {
+          targetId = visibleRows.find((candidate) => candidate.parentId === row.id)?.id;
+        }
+        break;
+      case "ArrowLeft":
+        // Collapse only a genuinely-expanded group. During a search,
+        // effectiveExpanded force-expands matching groups that aren't in the
+        // raw `expanded` set, and toggling those would just re-add them (no
+        // visible collapse) — so for a search-only-expanded group, fall through
+        // to moving to the parent instead of silently doing nothing.
+        if (row.isGroup && row.isExpanded && expanded.has(row.id)) {
+          event.preventDefault();
+          toggle(row.id); // collapse in place
+          return;
+        }
+        targetId = row.parentId; // move to parent
+        break;
+      default:
+        return; // let Enter/Space reach the focused button's onClick natively
+    }
+    if (targetId) {
+      event.preventDefault();
+      focusRow(targetId);
+    }
+  };
+
   const activate = async (node: BrowserNode) => {
     // Ignore a second activation while one is still resolving (a fast
     // double-click, or clicking another entry mid-fetch), so an async add
@@ -492,7 +597,14 @@ export function BrowserPanel({
 
       <ScrollArea className="min-h-0 flex-1">
         {hasContent ? (
-          <ul className="py-1" aria-busy={busyId != null}>
+          <ul
+            ref={treeRef}
+            className="py-1"
+            role="tree"
+            aria-label={t("browser.title")}
+            aria-busy={busyId != null}
+            onKeyDown={onTreeKeyDown}
+          >
             {filtered.map((section) => (
               <BrowserTreeNode
                 key={section.id}
@@ -500,6 +612,8 @@ export function BrowserPanel({
                 depth={0}
                 expanded={effectiveExpanded}
                 busyId={busyId}
+                activeRowId={currentRowId}
+                onRowFocus={setActiveRowId}
                 onToggle={toggle}
                 onActivate={activate}
                 onNewConnection={newConnection}
