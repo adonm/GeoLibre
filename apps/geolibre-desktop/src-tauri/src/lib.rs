@@ -2133,12 +2133,7 @@ fn sidecar_project_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        if let Ok(path) =
-            validate_sidecar_project_dir(resource_dir.join("backend").join("geolibre_server"))
-        {
-            return Ok(path);
-        }
-        if let Ok(path) = validate_sidecar_project_dir(resource_dir.join("geolibre_server")) {
+        if let Some(path) = resolve_sidecar_in_resource_dir(&resource_dir) {
             return Ok(path);
         }
     }
@@ -2151,6 +2146,34 @@ fn sidecar_project_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
             .join("backend")
             .join("geolibre_server"),
     )
+}
+
+/// Locate the bundled Python sidecar project under a Tauri resource directory.
+///
+/// Tauri bundles the `../../../backend/geolibre_server` resource by rewriting
+/// every leading `..` in the source path to an `_up_` directory, so in an
+/// installed build the project lands at
+/// `<resource_dir>/_up_/_up_/_up_/backend/geolibre_server` rather than directly
+/// under the resource dir (issue #1223). We probe the plain locations first,
+/// then a few `_up_` depths so the lookup keeps working if the number of `..`
+/// segments in the resource path ever changes.
+fn resolve_sidecar_in_resource_dir(resource_dir: &std::path::Path) -> Option<PathBuf> {
+    // Plain resource root plus a few `_up_` levels of margin over the observed
+    // 3-level bundle depth, so the lookup survives a change in Tauri's bundling.
+    const MAX_UP_DEPTH: usize = 4;
+    let mut prefix = resource_dir.to_path_buf();
+    for _ in 0..=MAX_UP_DEPTH {
+        if let Ok(path) =
+            validate_sidecar_project_dir(prefix.join("backend").join("geolibre_server"))
+        {
+            return Some(path);
+        }
+        if let Ok(path) = validate_sidecar_project_dir(prefix.join("geolibre_server")) {
+            return Some(path);
+        }
+        prefix = prefix.join("_up_");
+    }
+    None
 }
 
 fn validate_sidecar_project_dir(path: PathBuf) -> Result<PathBuf, String> {
@@ -2875,9 +2898,72 @@ mod tests {
     use super::{
         ensure_fetchable_url, find_zip_manifest_path, is_allowed_local_vector_path,
         is_allowed_project_path, is_disallowed_ip, is_safe_absolute_path, plugin_archive_file_name,
+        resolve_sidecar_in_resource_dir,
     };
     use std::io::{Cursor, Write};
     use std::net::IpAddr;
+    use std::path::PathBuf;
+
+    // A throwaway directory tree under the system temp dir that removes itself
+    // on drop, so scratch dirs are cleaned up even when an assertion panics.
+    // Uses the process id (no rand dependency) and clears any leftover from a
+    // prior run at construction.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("geolibre-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // Regression for issue #1223: installed builds place the bundled sidecar at
+    // `<resource_dir>/_up_/_up_/_up_/backend/geolibre_server`, so the resolver
+    // must follow the `_up_` chain rather than only checking the resource root.
+    #[test]
+    fn resolves_bundled_sidecar_under_up_prefix() {
+        let root = ScratchDir::new("sidecar-up");
+        let project = root
+            .path()
+            .join("_up_")
+            .join("_up_")
+            .join("_up_")
+            .join("backend")
+            .join("geolibre_server");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("pyproject.toml"), "[project]\n").unwrap();
+
+        let resolved =
+            resolve_sidecar_in_resource_dir(root.path()).expect("sidecar should be found");
+        assert_eq!(resolved, project.canonicalize().unwrap());
+
+        // The plain (0-level) layout used by portable builds, where the sidecar
+        // sits at `backend/geolibre_server` directly under the resource dir.
+        let plain_root = ScratchDir::new("sidecar-plain");
+        let plain_project = plain_root.path().join("backend").join("geolibre_server");
+        std::fs::create_dir_all(&plain_project).unwrap();
+        std::fs::write(plain_project.join("pyproject.toml"), "[project]\n").unwrap();
+        let plain_resolved = resolve_sidecar_in_resource_dir(plain_root.path())
+            .expect("plain sidecar should be found");
+        assert_eq!(plain_resolved, plain_project.canonicalize().unwrap());
+
+        // A resource dir without the project (and without a pyproject marker)
+        // resolves to nothing rather than a false positive.
+        let empty = ScratchDir::new("sidecar-empty");
+        assert!(resolve_sidecar_in_resource_dir(empty.path()).is_none());
+    }
 
     #[test]
     fn blocks_link_local_and_metadata_ips() {
