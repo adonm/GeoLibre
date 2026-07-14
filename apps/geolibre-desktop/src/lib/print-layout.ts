@@ -8,6 +8,13 @@
  * (PNG / PDF), so the preview is faithful to the output.
  */
 
+import {
+  formatRoundNum,
+  getRoundNum,
+  scaleDenomination,
+  type MapScaleUnit,
+} from "@geolibre/core";
+
 export type PaperSizeId =
   | "a4"
   | "a3"
@@ -155,6 +162,13 @@ export interface LayoutOptions {
   titleAlign?: "left" | "center" | "right";
   showLegend: boolean;
   showScaleBar: boolean;
+  /**
+   * Unit system the scale bar labels distances in: `"metric"` (km/m/cm),
+   * `"imperial"` (mi/ft), or `"nautical"` (nmi). Follows the project's map
+   * preference so the printed bar matches the on-screen bar. Defaults to
+   * `"metric"` when omitted.
+   */
+  scaleUnit?: MapScaleUnit;
   showNorthArrow: boolean;
   /**
    * Group the north arrow directly above the scale bar in the lower-right
@@ -682,6 +696,7 @@ export function drawLayout(
       outputMpp,
       unit,
       scaleRatio,
+      opts.scaleUnit ?? "metric",
     );
   }
   if (opts.showNorthArrow) {
@@ -808,29 +823,38 @@ function drawNorthArrow(
   ctx.restore();
 }
 
-/** Round a distance down to a "nice" 1/2/5 × 10ⁿ value. */
-function niceDistance(meters: number): number {
-  // Guard against a zero/negative body width: Math.log10(0) is -Infinity, which
-  // would propagate as NaN through the scale-bar geometry.
-  if (meters <= 0) return 1;
-  const pow = Math.pow(10, Math.floor(Math.log10(meters)));
-  const frac = meters / pow;
-  let nice: number;
-  if (frac >= 5) nice = 5;
-  else if (frac >= 2) nice = 2;
-  else nice = 1;
-  return nice * pow;
+/**
+ * Round a positive span with the shared cartographic rounder ({@link
+ * getRoundNum} — the same one the on-screen `PlanetaryScaleControl` uses), so
+ * the printed bar snaps a given ground span to the same value the map does.
+ * Falls back to 1 for a non-positive span (a zero/negative body width) so the
+ * bar geometry never turns into NaN — `getRoundNum` returns 0 there.
+ */
+function niceSpan(span: number): number {
+  return span > 0 ? getRoundNum(span) : 1;
 }
 
-function formatDistance(meters: number): string {
-  if (meters >= 1000) {
-    const km = meters / 1000;
-    return `${km % 1 === 0 ? km : km.toFixed(1)} km`;
+/**
+ * The denomination the print bar rounds and labels distances with. Delegates to
+ * the shared {@link scaleDenomination} (km/m, mi/ft, nmi) and adds one
+ * print-only refinement: a metric sub-metre span (street/parcel zoom) labels in
+ * centimetres rather than showing a useless "0.x m". Returns the size in metres
+ * of one unit of that denomination so the caller can round in unit space and
+ * convert the result back to metres (and thus pixels).
+ */
+function printScaleDenomination(
+  maxMeters: number,
+  unit: MapScaleUnit,
+): { metersPerUnit: number; label: string } {
+  if (unit === "metric" && maxMeters > 0 && maxMeters < 1) {
+    return { metersPerUnit: 0.01, label: "cm" };
   }
-  // Below a metre (street/parcel zoom) label in centimetres instead of showing
-  // a useless "0.0 m".
-  if (meters >= 1) return `${Math.round(meters)} m`;
-  return `${Math.round(meters * 100)} cm`;
+  return scaleDenomination(maxMeters, unit);
+}
+
+/** Format a rounded span in its denomination, trimming trailing-zero noise. */
+function formatSpanLabel(span: number, label: string): string {
+  return `${formatRoundNum(span)} ${label}`;
 }
 
 /**
@@ -849,9 +873,15 @@ function drawScaleBar(
   metersPerPixel: number,
   unit: number,
   scaleRatio = 0,
+  scaleUnit: MapScaleUnit = "metric",
 ): number {
   const maxMeters = maxWidthPx * metersPerPixel;
-  const distance = niceDistance(maxMeters);
+  // Round to a nice number in the target unit (feet, miles, km, ...) so the bar
+  // lands on a readable value in that system, then convert back to metres for
+  // the pixel width.
+  const { metersPerUnit, label } = printScaleDenomination(maxMeters, scaleUnit);
+  const rounded = niceSpan(maxMeters / metersPerUnit);
+  const distance = rounded * metersPerUnit;
   const barWidth = distance / metersPerPixel;
   const barHeight = unit * 1.1;
   const x0 = rightX - barWidth;
@@ -893,7 +923,7 @@ function drawScaleBar(
   ctx.font = `500 ${unit * 1.7}px system-ui, sans-serif`;
   ctx.textAlign = "right";
   ctx.textBaseline = "bottom";
-  ctx.fillText(formatDistance(distance), rightX, y0 - unit * 0.5);
+  ctx.fillText(formatSpanLabel(rounded, label), rightX, y0 - unit * 0.5);
   ctx.restore();
   return backingTop;
 }
