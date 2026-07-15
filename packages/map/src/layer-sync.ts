@@ -8,7 +8,7 @@ import {
 } from "@geolibre/core";
 import { addProtocol, config } from "maplibre-gl";
 import type maplibregl from "maplibre-gl";
-import { PMTiles, Protocol } from "pmtiles";
+import { FileSource, PMTiles, Protocol } from "pmtiles";
 import {
   ensureGeoJsonVtProtocol,
   geojsonVtTileUrl,
@@ -69,6 +69,7 @@ export function setExternalDeckLayerOrderHandler(
 const WMS_PROXY_PATH = "/__geolibre_wms_proxy";
 const PMTILES_PROTOCOL = "pmtiles";
 const PMTILES_PROTOCOL_GLOBAL_KEY = "__geolibrePMTilesProtocol";
+const PMTILES_ARCHIVE_KEYS_GLOBAL_KEY = "__geolibrePMTilesArchiveKeys";
 const MIN_LAYER_ZOOM = DEFAULT_LAYER_STYLE.minZoom;
 const MAX_LAYER_ZOOM = DEFAULT_LAYER_STYLE.maxZoom;
 const TEXT_MARKER_SHAPE = "text_marker";
@@ -791,7 +792,140 @@ function ensurePMTilesProtocol(url: string): void {
     addProtocol(PMTILES_PROTOCOL, protocol.tile);
   }
 
-  protocol.add(new PMTiles(stripPMTilesProtocol(url)));
+  // A key may already be backed by an in-memory archive from
+  // registerPMTilesArchive(); re-adding would silently replace it with a
+  // FetchSource for a URL that does not exist.
+  const key = stripPMTilesProtocol(url);
+  if (!protocol.tiles.has(key)) {
+    protocol.add(new PMTiles(key));
+  }
+}
+
+/**
+ * The MapLibre layer ids `syncLayers` creates for a `pmtiles` store layer, in
+ * the exact naming scheme `ensurePMTilesExternalLayer` uses. A layer built
+ * outside the PMTiles control (e.g. the offline basemap extract dialog) must
+ * put these in `metadata.nativeLayerIds` — a non-empty list is what marks the
+ * layer renderable rather than a placeholder.
+ */
+export function pmtilesNativeLayerIds(
+  sourceId: string,
+  tileType: "vector" | "raster",
+  sourceLayers: readonly string[],
+): string[] {
+  if (tileType === "raster") {
+    return [`${sourceId}-raster`];
+  }
+  return sourceLayers.flatMap((sourceLayer) =>
+    ["fill", "line", "circle"].map((kind) =>
+      pmtilesVectorLayerId(sourceId, sourceLayer, kind),
+    ),
+  );
+}
+
+/** Facts about a PMTiles archive needed to build a GeoLibre layer for it. */
+export interface PMTilesArchiveInfo {
+  tileType: "vector" | "raster";
+  /** Vector-tile layer ids from the archive metadata (empty for raster). */
+  sourceLayers: string[];
+  /** `[minLon, minLat, maxLon, maxLat]` from the archive header. */
+  bounds: [number, number, number, number];
+  minZoom: number;
+  maxZoom: number;
+}
+
+/**
+ * Reads the header (and, for vector archives, the metadata's `vector_layers`)
+ * of an in-memory PMTiles archive, so callers can construct a properly-shaped
+ * `pmtiles` store layer for it.
+ */
+export async function readPMTilesArchiveInfo(
+  bytes: Uint8Array,
+): Promise<PMTilesArchiveInfo> {
+  const file = new File([bytes as BlobPart], "archive.pmtiles", {
+    type: "application/octet-stream",
+  });
+  const archive = new PMTiles(new FileSource(file));
+  const header = await archive.getHeader();
+  // PMTiles TileType: 1 = MVT (vector); everything else renders as raster.
+  const tileType = header.tileType === 1 ? "vector" : "raster";
+  let sourceLayers: string[] = [];
+  if (tileType === "vector") {
+    try {
+      const metadata = (await archive.getMetadata()) as {
+        vector_layers?: Array<{ id?: unknown }>;
+      };
+      sourceLayers = (metadata.vector_layers ?? [])
+        .map((layer) => layer.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+    } catch {
+      // Metadata is optional; a vector archive without it still renders once
+      // the user knows its layer names.
+    }
+  }
+  return {
+    tileType,
+    sourceLayers,
+    bounds: [header.minLon, header.minLat, header.maxLon, header.maxLat],
+    minZoom: header.minZoom,
+    maxZoom: header.maxZoom,
+  };
+}
+
+/**
+ * Registers an in-memory PMTiles archive (e.g. an offline basemap extract)
+ * under a synthetic key so store layers can reference it like any remote
+ * archive. Returns the `pmtiles://<key>` URL to use as the layer's
+ * `source.url` / `sourcePath`.
+ *
+ * Re-registering the same key replaces the previous bytes. The archive is
+ * freed when its layer is removed (see {@link unregisterPMTilesArchive},
+ * invoked from {@link removeLayerFromMap}), so repeated extract-and-remove
+ * cycles don't pin every archive's bytes for the page session.
+ */
+export function registerPMTilesArchive(key: string, bytes: Uint8Array): string {
+  const protocol = getSharedPMTilesProtocol();
+  if (!isMapLibreProtocolRegistered()) {
+    addProtocol(PMTILES_PROTOCOL, protocol.tile);
+  }
+  const name = stripPMTilesProtocol(key);
+  const file = new File([bytes as BlobPart], name, {
+    type: "application/octet-stream",
+  });
+  // Keyed explicitly (not via protocol.add) so the lookup key is exactly the
+  // name embedded in the layer URL, independent of FileSource.getKey().
+  protocol.tiles.set(name, new PMTiles(new FileSource(file)));
+  getRegisteredPMTilesArchiveKeys().add(name);
+  return `${PMTILES_PROTOCOL}://${name}`;
+}
+
+/**
+ * Frees an in-memory archive registered by {@link registerPMTilesArchive}.
+ *
+ * Only keys this module registered are removed, so passing a remote
+ * `pmtiles://` URL (a lightweight `FetchSource` that may be shared by other
+ * layers) is a safe no-op. Returns whether an archive was actually removed.
+ */
+export function unregisterPMTilesArchive(key: string): boolean {
+  const name = stripPMTilesProtocol(key);
+  const registered = getRegisteredPMTilesArchiveKeys();
+  if (!registered.has(name)) return false;
+  registered.delete(name);
+  return getSharedPMTilesProtocol().tiles.delete(name);
+}
+
+// The set of in-memory-archive keys lives on globalThis alongside the shared
+// Protocol, so the two share a lifetime across module reloads (HMR) and never
+// drift — a stale module-level set could otherwise refuse to free archives the
+// live protocol still holds.
+function getRegisteredPMTilesArchiveKeys(): Set<string> {
+  const globalScope = globalThis as typeof globalThis & {
+    [PMTILES_ARCHIVE_KEYS_GLOBAL_KEY]?: Set<string>;
+  };
+  if (!globalScope[PMTILES_ARCHIVE_KEYS_GLOBAL_KEY]) {
+    globalScope[PMTILES_ARCHIVE_KEYS_GLOBAL_KEY] = new Set<string>();
+  }
+  return globalScope[PMTILES_ARCHIVE_KEYS_GLOBAL_KEY];
 }
 
 function getSharedPMTilesProtocol(): Protocol {
@@ -2857,6 +2991,12 @@ export function removeLayerFromMap(
   }
   // Free any client-side tile index built for this layer's tiled render path.
   unregisterGeoJsonVtSource(layerId);
+  // Free an in-memory PMTiles archive (an offline basemap extract) this layer
+  // referenced; a no-op for remote pmtiles:// URLs.
+  if (layer?.type === "pmtiles") {
+    const url = stringSource(layer.source.url) ?? layer.sourcePath;
+    if (typeof url === "string") unregisterPMTilesArchive(url);
+  }
 }
 
 function getExternalNativeLayerIds(layer?: GeoLibreLayer): string[] {

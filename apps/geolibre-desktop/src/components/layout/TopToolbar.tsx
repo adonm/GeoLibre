@@ -167,6 +167,9 @@ interface TopToolbarProps {
   projectFiles: ProjectFileActions;
   onOpenDiagnostics: () => void;
   onToggleThemeMode: () => void;
+  // Opens the Offline Basemap Extract panel, mounted in DesktopShell over the
+  // map so it can stay non-modal (the map is interactive for drawing a bbox).
+  onOpenBasemapExtract: () => void;
 }
 
 export function TopToolbar({
@@ -181,6 +184,7 @@ export function TopToolbar({
   projectFiles,
   onOpenDiagnostics,
   onToggleThemeMode,
+  onOpenBasemapExtract,
 }: TopToolbarProps) {
   const { t } = useTranslation();
   // The reverse-geocode plugin lives in the framework-agnostic plugins package
@@ -503,6 +507,7 @@ export function TopToolbar({
     stac: () => openStacSearchLayerPanel(appApi),
     flatGeobuf: () => openFlatGeobufAddVectorLayerPanel(appApi),
     pmtiles: () => openPMTilesLayerPanel(appApi),
+    basemapExtract: onOpenBasemapExtract,
     zarr: () => openZarrLayerPanel(appApi),
     netcdf: () => setNetcdfDialogOpen(true),
     lidar: () => openLidarLayerPanel(appApi),
