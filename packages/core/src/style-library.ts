@@ -243,6 +243,39 @@ export function sanitizeLayerStylePatch(value: unknown): Partial<LayerStyle> {
           ) {
             return [];
           }
+          // Optional per-rule fields (enabled toggle, zoom range, nesting,
+          // symbol overrides) carry through only when well-typed; a malformed
+          // optional field is dropped rather than the whole rule.
+          const optionalNumber = (value: unknown) =>
+            typeof value === "number" && Number.isFinite(value)
+              ? value
+              : undefined;
+          // Out-of-domain numbers are dropped (the rule inherits the layer
+          // value) rather than clamped, so a nonsense hand-edited value never
+          // silently becomes a different-but-valid override.
+          const optionalInRange = (value: unknown, min: number, max: number) => {
+            const parsed = optionalNumber(value);
+            return parsed !== undefined && parsed >= min && parsed <= max
+              ? parsed
+              : undefined;
+          };
+          const optionalString = (value: unknown) =>
+            typeof value === "string" ? value : undefined;
+          const minZoom = optionalInRange(rule.minZoom, 0, 24);
+          const maxZoom = optionalInRange(rule.maxZoom, 0, 24);
+          const parentId = optionalString(rule.parentId);
+          const strokeColor = optionalString(rule.strokeColor);
+          const strokeWidth = optionalInRange(
+            rule.strokeWidth,
+            0,
+            Number.POSITIVE_INFINITY,
+          );
+          const fillOpacity = optionalInRange(rule.fillOpacity, 0, 1);
+          const circleRadius = optionalInRange(
+            rule.circleRadius,
+            0,
+            Number.POSITIVE_INFINITY,
+          );
           return [
             {
               id: rule.id,
@@ -250,6 +283,14 @@ export function sanitizeLayerStylePatch(value: unknown): Partial<LayerStyle> {
               filter: rule.filter,
               color: rule.color,
               isElse: rule.isElse,
+              ...(rule.enabled === false ? { enabled: false } : {}),
+              ...(minZoom !== undefined ? { minZoom } : {}),
+              ...(maxZoom !== undefined ? { maxZoom } : {}),
+              ...(parentId !== undefined ? { parentId } : {}),
+              ...(strokeColor !== undefined ? { strokeColor } : {}),
+              ...(strokeWidth !== undefined ? { strokeWidth } : {}),
+              ...(fillOpacity !== undefined ? { fillOpacity } : {}),
+              ...(circleRadius !== undefined ? { circleRadius } : {}),
             },
           ];
         });

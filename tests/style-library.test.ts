@@ -110,6 +110,71 @@ describe("sanitizeLayerStylePatch", () => {
     ]);
   });
 
+  it("carries the extended per-rule fields and drops malformed ones", () => {
+    const patch = sanitizeLayerStylePatch({
+      vectorRules: [
+        {
+          id: "r1",
+          label: "A",
+          filter: "[]",
+          color: "#111111",
+          isElse: false,
+          enabled: false,
+          minZoom: 5,
+          maxZoom: 12,
+          parentId: "r0",
+          strokeColor: "#222222",
+          strokeWidth: 3,
+          fillOpacity: 0.4,
+          circleRadius: 9,
+        },
+        {
+          id: "r2",
+          label: "B",
+          filter: "[]",
+          color: "#333333",
+          isElse: false,
+          minZoom: "ten",
+          strokeWidth: Number.NaN,
+          parentId: 7,
+        },
+        {
+          id: "r3",
+          label: "C",
+          filter: "[]",
+          color: "#444444",
+          isElse: false,
+          minZoom: -1,
+          maxZoom: 99,
+          strokeWidth: -2,
+          fillOpacity: 2,
+          circleRadius: -5,
+        },
+      ],
+    });
+    assert.deepEqual(patch.vectorRules, [
+      {
+        id: "r1",
+        label: "A",
+        filter: "[]",
+        color: "#111111",
+        isElse: false,
+        enabled: false,
+        minZoom: 5,
+        maxZoom: 12,
+        parentId: "r0",
+        strokeColor: "#222222",
+        strokeWidth: 3,
+        fillOpacity: 0.4,
+        circleRadius: 9,
+      },
+      { id: "r2", label: "B", filter: "[]", color: "#333333", isElse: false },
+      // Out-of-domain numbers (negative zoom/width/radius, opacity above 1,
+      // zoom above 24) are dropped so the rule inherits the layer values.
+      { id: "r3", label: "C", filter: "[]", color: "#444444", isElse: false },
+    ]);
+  });
+
   it("rejects out-of-domain enum values and non-finite numbers", () => {
     const patch = sanitizeLayerStylePatch({
       vectorStyleMode: "hologram",
