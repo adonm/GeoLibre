@@ -513,6 +513,66 @@ export function effectiveVectorRules(style: LayerStyle): {
 }
 
 /**
+ * A rule's match condition as a MapLibre filter: its (ancestor-combined)
+ * attribute filter, with any scale range folded in as `["zoom"]` comparisons.
+ * The zoom window is half-open (`min <= zoom < max`), matching how
+ * {@link zoomWrappedRuleValue} activates rules per zoom segment. MapLibre only
+ * re-evaluates `["zoom"]` in filters at integer zoom levels, so a scale-ranged
+ * rule's features appear/disappear on whole zooms — the paint expressions keep
+ * the fractional-zoom precision.
+ */
+function ruleMatchFilter(rule: EffectiveVectorRule): unknown[] {
+  const conditions: unknown[] = [rule.filter];
+  if (rule.minZoom !== undefined) {
+    conditions.push([">=", ["zoom"], rule.minZoom]);
+  }
+  if (rule.maxZoom !== undefined) {
+    conditions.push(["<", ["zoom"], rule.maxZoom]);
+  }
+  return conditions.length === 1 ? rule.filter : ["all", ...conditions];
+}
+
+// The layer sync recomputes the visibility filter for every render sub-layer
+// (fill, line, point, labels, …) on every sync tick, and compiling it re-walks
+// and re-parses the whole rule tree. The store replaces the vectorRules array
+// on every edit, so the array's identity is a correct cache key; memoizing on
+// it makes the repeated per-sub-layer calls O(1), mirroring the WeakMap caches
+// in the map package (e.g. the text-marker scan).
+const visibilityFilterCache = new WeakMap<VectorRule[], unknown[] | null>();
+
+/**
+ * The MapLibre filter that hides features matching no rule, for a rule-based
+ * layer whose catch-all else rule has been switched off. Returns `null` — and
+ * callers then leave their geometry filters untouched — unless the layer is in
+ * `"rule-based"` mode AND carries an else record explicitly disabled
+ * (`enabled: false`). An absent else record keeps the historical fallback
+ * rendering, so projects saved before the toggle existed are unaffected.
+ *
+ * With the else rule off, the returned `["any", filter1, filter2, …]` keeps
+ * only features matched by a drawable rule (see {@link effectiveVectorRules});
+ * with no drawable rules it returns the vacuous `["any"]`, which matches
+ * nothing, so every feature hides. Sub-layers combine it with their geometry
+ * filters, which also drops unmatched features from labels and hit-testing —
+ * mirroring QGIS, where features matching no rule are simply not drawn.
+ *
+ * @param style - The layer style (reads {@link LayerStyle.vectorRules}).
+ * @returns The filter to `["all", …]`-combine into each sub-layer, or `null`.
+ */
+export function ruleBasedVisibilityFilter(style: LayerStyle): unknown[] | null {
+  if (styleValue(style, "vectorStyleMode") !== "rule-based") return null;
+  const all = styleValue(style, "vectorRules");
+  const cached = visibilityFilterCache.get(all);
+  if (cached !== undefined) return cached;
+  const elseRecord = all.find((rule) => rule.isElse);
+  const filter =
+    !elseRecord || elseRecord.enabled !== false
+      ? null
+      : ["any", ...effectiveVectorRules(style).rules.map(ruleMatchFilter)];
+  visibilityFilterCache.set(all, filter);
+  return filter;
+}
+
+/**
  * Wrap a per-zoom-segment value builder in a `["step", ["zoom"], …]` expression
  * when any rule carries a zoom bound. MapLibre only allows `["zoom"]` as the
  * top-level input of a `step`/`interpolate` in paint properties (not inside a

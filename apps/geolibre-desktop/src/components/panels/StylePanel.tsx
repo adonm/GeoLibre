@@ -2098,6 +2098,20 @@ export function StylePanel({
     }
     setVectorRules([...currentRules, createVectorRule(true, color)]);
   };
+  const setElseRuleEnabled = (enabled: boolean) => {
+    if (elseRule) {
+      updateVectorRule(elseRule.id, { enabled: enabled ? undefined : false });
+      return;
+    }
+    // No else record yet (its absence means enabled): unchecking materializes
+    // a disabled one, which is what hides features matching no rule.
+    if (!enabled) {
+      setVectorRules([
+        ...currentRules,
+        { ...createVectorRule(true, style.fillColor), enabled: false },
+      ]);
+    }
+  };
 
   // --- Shared Expression Builder (GH #1306) ---
   // builderFeatures / builderFieldNames / builderVariables are memoized above
@@ -2678,22 +2692,16 @@ export function StylePanel({
             </div>
           ))}
           <div className="grid grid-cols-[auto_auto_1fr] items-center gap-2 rounded-md border border-dashed border-input p-2">
-            {elseRule ? (
-              // The enable toggle needs an else-rule record to write to; the
-              // default (no record yet) is always enabled, so it only shows
-              // once a rule exists - e.g. after an import that disabled it.
-              <input
-                type="checkbox"
-                checked={elseRule.enabled !== false}
-                title={t("style.symbology.elseRuleEnabled")}
-                aria-label={t("style.symbology.elseRuleEnabled")}
-                onChange={(event) =>
-                  updateVectorRule(elseRule.id, {
-                    enabled: event.target.checked ? undefined : false,
-                  })
-                }
-              />
-            ) : null}
+            {/* No else record yet means enabled; unchecking materializes a
+                disabled record so features matching no rule are hidden
+                (QGIS-style), not painted with the base style. */}
+            <input
+              type="checkbox"
+              checked={elseRule ? elseRule.enabled !== false : true}
+              title={t("style.symbology.elseRuleEnabled")}
+              aria-label={t("style.symbology.elseRuleEnabled")}
+              onChange={(event) => setElseRuleEnabled(event.target.checked)}
+            />
             <ColorField
               fill={false}
               aria-label={t("style.symbology.elseRuleColor")}
@@ -2709,15 +2717,27 @@ export function StylePanel({
           </div>
         </div>
       )}
-      <Button
-        type="button"
-        size="sm"
-        className="w-full"
-        disabled={!vectorStyleSettingsChanged}
-        onClick={applyVectorStyleSettings}
-      >
-        {t("style.symbology.applyStyleType")}
-      </Button>
+      {/* With rule-based already active, rule edits write straight to the
+          store and render live, so the Apply button would never enable again —
+          a permanently disabled button reads as "your edits are not applied".
+          Replace it with a hint saying edits are live; the button returns as
+          soon as the user drafts a different style type. */}
+      {draftVectorStyleMode === "rule-based" &&
+      draftVectorStyleMode === styleValue(style, "vectorStyleMode") ? (
+        <p className="text-xs text-muted-foreground">
+          {t("style.symbology.rulesApplyLive")}
+        </p>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          className="w-full"
+          disabled={!vectorStyleSettingsChanged}
+          onClick={applyVectorStyleSettings}
+        >
+          {t("style.symbology.applyStyleType")}
+        </Button>
+      )}
       {draftVectorStyleMode === "rule-based" &&
         draftVectorStyleMode !== styleValue(style, "vectorStyleMode") && (
           <p className="text-xs text-muted-foreground">
