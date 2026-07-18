@@ -5,6 +5,7 @@ import {
 } from "@geolibre/core";
 import {
   RASTER_MAX_CLASSES,
+  RASTER_MAX_STORED_CLASSES,
   RASTER_MIN_CLASSES,
   RASTER_MIN_CUSTOM_COLORS,
   type RasterBandStats,
@@ -385,12 +386,26 @@ export function RasterSymbologySection({
     const effectiveStats: RasterBandStats | null = overrides.range
       ? { min: overrides.range[0], max: overrides.range[1], histogram: stats?.histogram ?? [] }
       : stats;
-    const breaks = computeRasterBreaks(
-      next.method,
-      effectiveStats,
-      next.classCount,
-      overrides.manualBreaks ?? symbology?.breaks,
-    );
+    // A manual symbology whose edges already match the requested class count
+    // keeps them verbatim, even past the 12-class authoring cap:
+    // computeRasterBreaks clamps to that cap, which would collapse a
+    // categorical table symbology (up to RASTER_MAX_STORED_CLASSES classes)
+    // to an even 12-class spread on any ramp/color/method edit. A class-count
+    // edit (edges no longer match) still recomputes as before.
+    const manualEdges = overrides.manualBreaks ?? symbology?.breaks ?? [];
+    const keepManualEdges =
+      next.method === "manual" &&
+      manualEdges.length === next.classCount + 1 &&
+      next.classCount <= RASTER_MAX_STORED_CLASSES &&
+      manualEdges.every((value) => Number.isFinite(value));
+    const breaks = keepManualEdges
+      ? [...manualEdges].sort((a, b) => a - b)
+      : computeRasterBreaks(
+          next.method,
+          effectiveStats,
+          next.classCount,
+          overrides.manualBreaks ?? symbology?.breaks,
+        );
     const custom =
       (next.customColors?.length ?? 0) >= MIN_CUSTOM_COLORS
         ? next.customColors
@@ -401,7 +416,11 @@ export function RasterSymbologySection({
         classified: true,
         ramp: next.ramp,
         method: next.method,
-        classCount: next.classCount,
+        // Derived from the breaks actually computed, not the requested count:
+        // computeRasterBreaks clamps to the authoring cap, and a stored
+        // count/breaks mismatch would make the record inconsistent (e.g. when
+        // re-ramping a >12-class table symbology from the RAT panel).
+        classCount: breaks.length - 1,
         breaks,
         ...(custom ? { customColors: custom } : {}),
       },
@@ -603,12 +622,15 @@ export function RasterSymbologySection({
         ? opts.customColors
         : undefined;
     if (!custom) return null;
+    const breaks = computeRasterBreaks(method, stats, classCount);
     return {
       classified: false,
       ramp: opts.ramp,
       method,
-      classCount,
-      breaks: computeRasterBreaks(method, stats, classCount),
+      // Derived from the computed breaks (which clamp to the authoring cap)
+      // so the stored record stays self-consistent.
+      classCount: breaks.length - 1,
+      breaks,
       customColors: custom,
     };
   }
@@ -1040,6 +1062,15 @@ function ClassificationControls({
                 {count}
               </option>
             ))}
+            {symbology.classCount > RASTER_MAX_CLASSES ? (
+              // A categorical symbology applied from the Raster Attribute
+              // Table can carry more classes than the authoring cap; show the
+              // real count instead of letting the native select fall back to
+              // the first option. Picking a listed count re-classifies.
+              <option value={symbology.classCount}>
+                {symbology.classCount}
+              </option>
+            ) : null}
           </Select>
         </div>
       </div>
